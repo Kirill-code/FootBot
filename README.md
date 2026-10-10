@@ -2,13 +2,15 @@
 
 Мобильное PWA для подбора кроссовок по фото стопы.
 
+**Живая версия: https://kirill-code.github.io/FootBot/**
+
 ## Стек
 
 - Vite + React 19 + TypeScript (strict)
 - `react-router` (HashRouter — для деплоя на GitHub Pages)
 - `vite-plugin-pwa` (Workbox, `registerType: 'autoUpdate'`)
 - `dexie` + `dexie-react-hooks` (IndexedDB: фото стоп, замеры)
-- OpenCV.js — **не установлен на этом этапе**, подключение ленивым чанком планируется отдельно
+- `@techstark/opencv-js` — измерение стопы по фото (ленивый чанк, грузится только при сканировании)
 
 ## Команды
 
