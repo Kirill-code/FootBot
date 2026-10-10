@@ -5,3 +5,9 @@ tools
 *.local
 *.tsbuildinfo
 .DS_Store
+UserImages/
+footexample.JPG
+
+# Локальные фото для отладки (не коммитить)
+UserImages/
+footexample.JPG

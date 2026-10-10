@@ -2,16 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
 import { loadOpenCv, subscribeOpenCvState, type OpenCvLoadState } from '../analysis/opencvLoader'
 
-// Скан стопы: фото → downscale → OpenCV (лениво) → измерение с калибровкой А4.
+// Скан стопы: фото → downscale → OpenCV (лениво) → измерение с калибровкой
+// по эталону (лист А4/А5 или банковская карта).
 // OpenCV и модуль анализа грузятся динамически — в main-бандл не попадают.
 
 type Phase =
   | 'idle' // готов к выбору фото
-  | 'loading-opencv' // загрузка wasm
+  | 'loading-opencv' // загрузка wasm (~16 МБ)
   | 'analyzing' // анализ фото
-  | 'saved' // результат сохранён
-  | 'no-a4' // лист А4 не найден
-  | 'error' // ошибка
+  | 'measured' // есть замер, сохранено
+  | 'no-reference' // стопа найдена, эталон не найден
+  | 'no-foot' // стопа не найдена
+  | 'engine-error' // ошибка загрузки/работы движка
   | 'manual' // ручной ввод
 
 const MAX_DIM_PX = 1600
@@ -32,6 +34,24 @@ async function fileToImageData(file: Blob, maxDim: number): Promise<{ imageData:
   return { imageData: ctx.getImageData(0, 0, w, h), canvas }
 }
 
+/** Рисует превью фото с наложенным контуром стопы. */
+function drawPreview(canvas: HTMLCanvasElement, contour: Array<{ x: number; y: number }>) {
+  const preview = document.createElement('canvas')
+  preview.width = canvas.width
+  preview.height = canvas.height
+  const ctx = preview.getContext('2d')!
+  ctx.drawImage(canvas, 0, 0)
+  if (contour.length >= 3) {
+    ctx.strokeStyle = '#3ddc84'
+    ctx.lineWidth = Math.max(3, canvas.width / 250)
+    ctx.beginPath()
+    contour.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
+    ctx.closePath()
+    ctx.stroke()
+  }
+  return preview.toDataURL('image/jpeg', 0.85)
+}
+
 /** Сериализует canvas в Blob: webp q0.8, fallback jpeg; ≤ 1 МБ. */
 async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   const toBlob = (type: string, quality: number) =>
@@ -49,11 +69,28 @@ async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return last
 }
 
-const OPENCV_STATUS_TEXT: Record<OpenCvLoadState, string> = {
-  idle: 'Подготовка…',
-  loading: 'Загрузка OpenCV (первый запуск может занять время)…',
-  ready: 'OpenCV загружен',
-  error: 'Ошибка загрузки OpenCV'
+/** Прогресс загрузки движка: реальные байты недоступны, показываем плавный ход. */
+function useLoadingProgress(active: boolean, done: boolean): number {
+  const [progress, setProgress] = useState(0)
+  useEffect(() => {
+    if (!active) {
+      setProgress(0)
+      return
+    }
+    if (done) {
+      setProgress(100)
+      return
+    }
+    const started = Date.now()
+    const timer = setInterval(() => {
+      // 16 МБ: на медленном мобильном — до 60 с. Ползём до 95%, не «зависая».
+      const elapsed = (Date.now() - started) / 1000
+      const estimate = Math.min(95, (elapsed / 45) * 100)
+      setProgress((p) => Math.max(p, Math.round(estimate)))
+    }, 500)
+    return () => clearInterval(timer)
+  }, [active, done])
+  return progress
 }
 
 export default function ScanPage() {
@@ -61,13 +98,21 @@ export default function ScanPage() {
   const [foot, setFoot] = useState<FootSide>('left')
   const [phase, setPhase] = useState<Phase>('idle')
   const [cvState, setCvState] = useState<OpenCvLoadState>('idle')
+  const [progress, setProgress] = useState(0)
   const [result, setResult] = useState<{ lengthMm: number; widthMm: number } | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [errorText, setErrorText] = useState('')
   const [manualLength, setManualLength] = useState('')
   const [manualWidth, setManualWidth] = useState('')
   const [manualSaved, setManualSaved] = useState(false)
 
   useEffect(() => subscribeOpenCvState(setCvState), [])
+  const engineReady = cvState === 'ready'
+  const loadingProgress = useLoadingProgress(phase === 'loading-opencv', engineReady)
+
+  useEffect(() => {
+    setProgress(loadingProgress)
+  }, [loadingProgress])
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -76,6 +121,7 @@ export default function ScanPage() {
 
     setPhase('loading-opencv')
     setResult(null)
+    setPreviewUrl(null)
     setErrorText('')
     try {
       // 1. Загружаем OpenCV (лениво, singleton).
@@ -89,34 +135,51 @@ export default function ScanPage() {
       const { measureFoot } = await import('../analysis/measureFoot')
       const m = measureFoot(imageData)
 
-      if (!m) {
-        setPhase('no-a4')
-        return
+      // Превью с контуром (если стопа найдена).
+      if (m.footFound && m.footContour.length >= 3) {
+        setPreviewUrl(drawPreview(canvas, m.footContour))
       }
 
-      // 4. Сохраняем фото (≤1 МБ) + замер в Dexie, атомарно.
-      const blob = await canvasToBlob(canvas)
-      await db.transaction('rw', db.photos, db.measurements, async () => {
+      if (m.referenceFound && m.lengthMm !== null && m.widthMm !== null) {
+        // 4а. Есть и эталон, и стопа — сохраняем фото + замер.
+        const lengthMm = m.lengthMm
+        const widthMm = m.widthMm
+        const blob = await canvasToBlob(canvas)
+        await db.transaction('rw', db.photos, db.measurements, async () => {
+          await db.photos.add({
+            foot,
+            createdAt: Date.now(),
+            blob,
+            footLengthMm: lengthMm,
+            footWidthMm: widthMm
+          })
+          await db.measurements.add({
+            createdAt: Date.now(),
+            footLengthMm: lengthMm,
+            footWidthMm: widthMm,
+            source: 'opencv',
+            contour: m.footContour
+          })
+        })
+        setResult({ lengthMm, widthMm })
+        setPhase('measured')
+      } else if (m.footFound) {
+        // 4б. Стопа есть, эталона нет — фото сохраняем, просим переснять с эталоном.
+        const blob = await canvasToBlob(canvas)
         await db.photos.add({
           foot,
           createdAt: Date.now(),
           blob,
-          footLengthMm: m.lengthMm,
-          footWidthMm: m.widthMm
+          footLengthMm: null,
+          footWidthMm: null
         })
-        await db.measurements.add({
-          createdAt: Date.now(),
-          footLengthMm: m.lengthMm,
-          footWidthMm: m.widthMm,
-          source: 'opencv',
-          contour: m.contour
-        })
-      })
-      setResult({ lengthMm: m.lengthMm, widthMm: m.widthMm })
-      setPhase('saved')
+        setPhase('no-reference')
+      } else {
+        setPhase('no-foot')
+      }
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : String(err))
-      setPhase('error')
+      setPhase('engine-error')
     }
   }
 
@@ -142,13 +205,13 @@ export default function ScanPage() {
   return (
     <main className="page">
       <h1 className="page-title">Скан стопы</h1>
-      <p className="page-subtitle">Фото со стопой и листом А4 — автоматический замер</p>
+      <p className="page-subtitle">Фото стопы рядом с известным объектом — автоматический замер</p>
 
       <div className="card">
         <p className="hint">
-          Как снимать: положите стопу на тёмный лист или ковёр рядом с листом А4
-          (можно ступить на него носком в угол). Снимайте строго сверху, чтобы весь
-          лист А4 попал в кадр — он задаёт масштаб для измерений.
+          Как снимать: положите стопу на пол и рядом положите банковскую карту или лист А4/А5
+          (весь объект должен попасть в кадр). Снимайте строго сверху. Карта или лист задают
+          масштаб для измерений.
         </p>
       </div>
 
@@ -182,31 +245,39 @@ export default function ScanPage() {
 
       <button className="btn btn-block" disabled={busy} onClick={() => inputRef.current?.click()}>
         {phase === 'loading-opencv'
-          ? OPENCV_STATUS_TEXT[cvState]
+          ? 'Загружаем движок анализа…'
           : phase === 'analyzing'
             ? 'Анализ фото…'
             : `Сфотографировать ${foot === 'left' ? 'левую' : 'правую'} стопу`}
       </button>
 
-      {phase === 'no-a4' && (
-        <div className="card">
-          <p className="hint" style={{ color: 'var(--accent)' }}>
-            На фото не найден лист А4 — без него невозможно определить масштаб.
-            Убедитесь, что весь лист попал в кадр и снимок сделан сверху, затем
-            попробуйте ещё раз.
+      {phase === 'loading-opencv' && (
+        <div className="card" style={{ display: 'grid', gap: 8 }}>
+          <p className="hint">
+            Загружаем движок анализа (~16 МБ). Рекомендуем Wi-Fi — на мобильной сети
+            загрузка может занять до минуты.
           </p>
+          <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
+            <div
+              style={{
+                height: '100%',
+                width: `${progress}%`,
+                background: 'var(--accent)',
+                transition: 'width 0.5s ease'
+              }}
+            />
+          </div>
+          <p className="hint" style={{ textAlign: 'right' }}>{progress}%</p>
         </div>
       )}
 
-      {phase === 'error' && (
-        <div className="card">
-          <p className="hint" style={{ color: '#ff7a7a' }}>
-            Произошла ошибка: {errorText}
-          </p>
+      {previewUrl && (
+        <div className="card" style={{ padding: 8 }}>
+          <img src={previewUrl} alt="Стопа с контуром" style={{ width: '100%', borderRadius: 10 }} />
         </div>
       )}
 
-      {phase === 'saved' && result && (
+      {phase === 'measured' && result && (
         <div className="card">
           <p style={{ margin: '0 0 8px', fontWeight: 600 }}>Результат измерения</p>
           <p className="hint">
@@ -214,6 +285,34 @@ export default function ScanPage() {
           </p>
           <p className="hint" style={{ color: 'var(--accent)', marginTop: 8 }}>
             Сохранено в профиль
+          </p>
+        </div>
+      )}
+
+      {phase === 'no-reference' && (
+        <div className="card">
+          <p className="hint" style={{ color: 'var(--accent)' }}>
+            Стопа найдена (контур на фото), но не найден эталон масштаба. Положите рядом со
+            стопой банковскую карту или лист А4 и переснимите — тогда приложение само
+            измерит стопу. Либо введите размеры вручную ниже.
+          </p>
+        </div>
+      )}
+
+      {phase === 'no-foot' && (
+        <div className="card">
+          <p className="hint" style={{ color: '#ff7a7a' }}>
+            Стопа не найдена на фото. Снимите строго сверху, чтобы вся стопа попала в кадр,
+            на контрастном полу (носок не должен сливаться с фоном), и попробуйте ещё раз.
+          </p>
+        </div>
+      )}
+
+      {phase === 'engine-error' && (
+        <div className="card">
+          <p className="hint" style={{ color: '#ff7a7a' }}>
+            Не удалось загрузить или запустить движок анализа: {errorText}.
+            Проверьте соединение (при первом запуске нужен интернет) и попробуйте снова.
           </p>
         </div>
       )}
