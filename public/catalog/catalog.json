@@ -1,0 +1,1206 @@
+[
+  {
+    "id": "nike-air-force-1-07",
+    "brand": "Nike",
+    "name": "Air Force 1 '07",
+    "purpose": "casual",
+    "fit": "wide",
+    "last": "wide",
+    "fitAdjustment": -0.5,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 115,
+    "description": "Легендарные белые кроссовки с массивной подошвой Air, просторные в носочной части.",
+    "image": "images/nike-air-force-1-07.webp"
+  },
+  {
+    "id": "nike-dunk-low",
+    "brand": "Nike",
+    "name": "Dunk Low",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 115,
+    "description": "Культовая баскетбольная классика 80-х в повседневном низком силуэте, садится точно в размер.",
+    "image": "images/nike-dunk-low.webp"
+  },
+  {
+    "id": "air-jordan-1-high",
+    "brand": "Jordan",
+    "name": "Air Jordan 1 High",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 180,
+    "description": "Первая модель Майкла Джордана с высоким берцем и фирменной перфорацией.",
+    "image": "images/air-jordan-1-high.webp"
+  },
+  {
+    "id": "nike-air-max-270",
+    "brand": "Nike",
+    "name": "Air Max 270",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 160,
+    "description": "Максимально видимая вставка Air 270° в пятке и облегающий, узковатый мыс.",
+    "image": "images/nike-air-max-270.webp"
+  },
+  {
+    "id": "adidas-samba-og",
+    "brand": "adidas",
+    "name": "Samba OG",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38⅔",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 255
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "43⅓",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44⅔",
+        "footLengthMm": 285
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "46",
+        "footLengthMm": 295
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "47⅓",
+        "footLengthMm": 305
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "48⅔",
+        "footLengthMm": 315
+      }
+    ],
+    "priceUsd": 100,
+    "description": "Футбольные силуэт 50-х с замшевым носом и резиновой подошвой, узкая посадка.",
+    "image": "images/adidas-samba-og.webp"
+  },
+  {
+    "id": "adidas-gazelle",
+    "brand": "adidas",
+    "name": "Gazelle",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38⅔",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 255
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "43⅓",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44⅔",
+        "footLengthMm": 285
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "46",
+        "footLengthMm": 295
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "47⅓",
+        "footLengthMm": 305
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "48⅔",
+        "footLengthMm": 315
+      }
+    ],
+    "priceUsd": 100,
+    "description": "Плоская замшевая классика с минималистичным дизайном, сужается к носку.",
+    "image": "images/adidas-gazelle.webp"
+  },
+  {
+    "id": "adidas-superstar",
+    "brand": "adidas",
+    "name": "Superstar",
+    "purpose": "casual",
+    "fit": "wide",
+    "last": "wide",
+    "fitAdjustment": -0.5,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38⅔",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 255
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "43⅓",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44⅔",
+        "footLengthMm": 285
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "46",
+        "footLengthMm": 295
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "47⅓",
+        "footLengthMm": 305
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "48⅔",
+        "footLengthMm": 315
+      }
+    ],
+    "priceUsd": 100,
+    "description": "Ракушка на носке и три полоски — просторная модель, часто берут на полразмера меньше.",
+    "image": "images/adidas-superstar.webp"
+  },
+  {
+    "id": "adidas-stan-smith",
+    "brand": "adidas",
+    "name": "Stan Smith",
+    "purpose": "casual",
+    "fit": "wide",
+    "last": "wide",
+    "fitAdjustment": -0.5,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38⅔",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 255
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "43⅓",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44⅔",
+        "footLengthMm": 285
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "46",
+        "footLengthMm": 295
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "47⅓",
+        "footLengthMm": 305
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "48⅔",
+        "footLengthMm": 315
+      }
+    ],
+    "priceUsd": 100,
+    "description": "Кожаные теннисные кроссовки с перфорированными полосками, полнотная колодка.",
+    "image": "images/adidas-stan-smith.webp"
+  },
+  {
+    "id": "adidas-campus-00s",
+    "brand": "adidas",
+    "name": "Campus 00s",
+    "purpose": "casual",
+    "fit": "wide",
+    "last": "wide",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38⅔",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 255
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "43⅓",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44⅔",
+        "footLengthMm": 285
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "46",
+        "footLengthMm": 295
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "47⅓",
+        "footLengthMm": 305
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "48⅔",
+        "footLengthMm": 315
+      }
+    ],
+    "priceUsd": 110,
+    "description": "Объёмная переизданная версия Campus с мягкой замшей и широкой посадкой.",
+    "image": "images/adidas-campus-00s.webp"
+  },
+  {
+    "id": "new-balance-550",
+    "brand": "New Balance",
+    "name": "550",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0.5,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 110,
+    "description": "Ретро-баскетбольный силуэт 89-го года с узким носом, часто берут на полразмера больше.",
+    "image": "images/new-balance-550.webp"
+  },
+  {
+    "id": "new-balance-2002r",
+    "brand": "New Balance",
+    "name": "2002R",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 145,
+    "description": "Комфортная «dad shoe» с амортизацией ABZORB и нейтральной посадкой.",
+    "image": "images/new-balance-2002r.webp"
+  },
+  {
+    "id": "new-balance-530",
+    "brand": "New Balance",
+    "name": "530",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 110,
+    "description": "Легкий ретро-раннер с сеткой и накладками 2000-х, размер в размер.",
+    "image": "images/new-balance-530.webp"
+  },
+  {
+    "id": "asics-gel-kayano-14",
+    "brand": "ASICS",
+    "name": "Gel-Kayano 14",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "39.5",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40.5",
+        "footLengthMm": 252
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41.5",
+        "footLengthMm": 260
+      },
+      {
+        "us": 8.5,
+        "uk": 7.5,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 9.5,
+        "uk": 8.5,
+        "eu": "43.5",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 288
+      }
+    ],
+    "priceUsd": 150,
+    "description": "Возрождённый беговой хит с металлическими накладками и гелевой амортизацией.",
+    "image": "images/asics-gel-kayano-14.webp"
+  },
+  {
+    "id": "asics-gel-1130",
+    "brand": "ASICS",
+    "name": "Gel-1130",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "39.5",
+        "footLengthMm": 245
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40.5",
+        "footLengthMm": 252
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41.5",
+        "footLengthMm": 260
+      },
+      {
+        "us": 8.5,
+        "uk": 7.5,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 9.5,
+        "uk": 8.5,
+        "eu": "43.5",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 288
+      }
+    ],
+    "priceUsd": 110,
+    "description": "Доступный техно-раннер в духе Y2K с поддержкой средней части стопы.",
+    "image": "images/asics-gel-1130.webp"
+  },
+  {
+    "id": "onitsuka-mexico-66",
+    "brand": "Onitsuka Tiger",
+    "name": "Mexico 66",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0.5,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "39.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40.5",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41.5",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46.5",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 105,
+    "description": "Икона 1966 года с фирменными полосами и тонкой узкой колодкой.",
+    "image": "images/onitsuka-mexico-66.webp"
+  },
+  {
+    "id": "puma-speedcat-og",
+    "brand": "Puma",
+    "name": "Speedcat OG",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0.5,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 105,
+    "description": "Автоспортивный силуэт с замшевым верхом, узкий и низкий по посадке.",
+    "image": "images/puma-speedcat-og.webp"
+  },
+  {
+    "id": "puma-palermo",
+    "brand": "Puma",
+    "name": "Palermo",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47.5",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 95,
+    "description": "Итальянская terrace-классика с T-образным носом и прямой нейтральной посадкой.",
+    "image": "images/puma-palermo.webp"
+  },
+  {
+    "id": "salomon-xt-6",
+    "brand": "Salomon",
+    "name": "XT-6",
+    "purpose": "trail",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": 0.5,
+    "sizeChart": [
+      {
+        "us": 8,
+        "uk": 7.5,
+        "eu": "41⅓",
+        "footLengthMm": 260
+      },
+      {
+        "us": 8.5,
+        "uk": 8,
+        "eu": "42",
+        "footLengthMm": 265
+      },
+      {
+        "us": 9,
+        "uk": 8.5,
+        "eu": "42⅔",
+        "footLengthMm": 270
+      },
+      {
+        "us": 9.5,
+        "uk": 9,
+        "eu": "43",
+        "footLengthMm": 272
+      },
+      {
+        "us": 10,
+        "uk": 9.5,
+        "eu": "43⅓",
+        "footLengthMm": 275
+      },
+      {
+        "us": 10.5,
+        "uk": 10,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10.5,
+        "eu": "44⅔",
+        "footLengthMm": 285
+      }
+    ],
+    "priceUsd": 200,
+    "description": "Флагманская трейловая модель с системой Quicklace и плотным облеганием.",
+    "image": "images/salomon-xt-6.webp"
+  },
+  {
+    "id": "converse-chuck-70",
+    "brand": "Converse",
+    "name": "Chuck 70",
+    "purpose": "casual",
+    "fit": "narrow",
+    "last": "narrow",
+    "fitAdjustment": -1,
+    "sizeChart": [
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "41.5",
+        "footLengthMm": 267
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42.5",
+        "footLengthMm": 274
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "44",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "45",
+        "footLengthMm": 287
+      }
+    ],
+    "priceUsd": 85,
+    "description": "Канвас-классика 70-х, заметно маломерит — рекомендуется брать на размер меньше.",
+    "image": "images/converse-chuck-70.webp"
+  },
+  {
+    "id": "vans-old-skool",
+    "brand": "Vans",
+    "name": "Old Skool",
+    "purpose": "casual",
+    "fit": "medium",
+    "last": "medium",
+    "fitAdjustment": 0,
+    "sizeChart": [
+      {
+        "us": 6,
+        "uk": 5,
+        "eu": "38.5",
+        "footLengthMm": 240
+      },
+      {
+        "us": 7,
+        "uk": 6,
+        "eu": "40",
+        "footLengthMm": 250
+      },
+      {
+        "us": 8,
+        "uk": 7,
+        "eu": "40.5",
+        "footLengthMm": 260
+      },
+      {
+        "us": 9,
+        "uk": 8,
+        "eu": "42",
+        "footLengthMm": 270
+      },
+      {
+        "us": 10,
+        "uk": 9,
+        "eu": "43",
+        "footLengthMm": 280
+      },
+      {
+        "us": 11,
+        "uk": 10,
+        "eu": "44.5",
+        "footLengthMm": 290
+      },
+      {
+        "us": 12,
+        "uk": 11,
+        "eu": "46",
+        "footLengthMm": 300
+      },
+      {
+        "us": 13,
+        "uk": 12,
+        "eu": "47",
+        "footLengthMm": 310
+      }
+    ],
+    "priceUsd": 75,
+    "description": "Скейтовая классика с фирменной волнистой полосой, размер в размер.",
+    "image": "images/vans-old-skool.webp"
+  }
+]
