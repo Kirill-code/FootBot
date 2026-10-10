@@ -1,3 +1,4 @@
+import { catalogImageUrl } from '../catalog/catalogApi'
 import type { Fit, Purpose, ShoeModel } from '../catalog/types'
 
 const PURPOSE_LABELS: Record<Purpose, string> = {
@@ -26,7 +27,7 @@ interface Props {
 export default function ShoeCard({ model, score, verdict, recommendedUs, recommendedEu }: Props) {
   return (
     <article className="shoe-card">
-      {model.image && <img className="shoe-card-img" src={model.image} alt={model.name} loading="lazy" />}
+      {model.image && <img className="shoe-card-img" src={catalogImageUrl(model.image)} alt={model.name} loading="lazy" />}
       <div className="shoe-card-body">
         <span className="shoe-card-brand">{model.brand}</span>
         <span className="shoe-card-name">{model.name}</span>

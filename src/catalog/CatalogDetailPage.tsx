@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router'
-import { getModelById } from './catalogApi'
+import { getModelById, catalogImageUrl } from './catalogApi'
 import type { Fit, Purpose, ShoeModel } from './types'
 import { scoreModel } from '../matching/scoring'
 import type { ScoreResult } from '../matching/scoring'
@@ -69,7 +69,7 @@ export default function CatalogDetailPage() {
         <>
           <h1 className="page-title">{model.name}</h1>
           <p className="page-subtitle">{model.brand}</p>
-          {model.image && <img className="shoe-card-img" style={{ borderRadius: 14 }} src={model.image} alt={model.name} />}
+          {model.image && <img className="shoe-card-img" style={{ borderRadius: 14 }} src={catalogImageUrl(model.image)} alt={model.name} />}
 
           {model.priceUsd !== undefined && (
             <p className="page-title" style={{ fontSize: 20 }}>${model.priceUsd}</p>
