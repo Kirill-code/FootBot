@@ -295,7 +295,7 @@ function findReference(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: 
   // ловит internalEdgeDensity.
   if (best && best.score < 0.3) {
     const frameMean = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
-    if (best.brightness < frameMean * 1.15 + 15) return null
+    if (best.brightness < frameMean * 1.1 + 12) return null
   }
   return best
 }
@@ -333,14 +333,23 @@ let activeRefBounds: { x: number; y: number; w: number; h: number } | null = nul
  * сцена целиком) центроид часто случайно попадает в зону листа. */
 function overlapsReference(cv: Cv, cnt: CvMat, bounds: { x: number; y: number; w: number; h: number }): boolean {
   const box = cv.boundingRect(cnt)
+  // Точки контура внутри зоны эталона: bbox-перекрытие ненадёжно (тонкое
+  // кольцо стопы рядом с листом имеет большой bbox, но не касается листа).
+  let inside = 0
+  for (let i = 0; i < cnt.rows; i++) {
+    const p = cnt.intPtr(i, 0) as ArrayLike<number>
+    if (p[0] >= bounds.x - 10 && p[0] <= bounds.x + bounds.w + 10 && p[1] >= bounds.y - 10 && p[1] <= bounds.y + bounds.h + 10) {
+      inside++
+    }
+  }
+  const frac = cnt.rows > 0 ? inside / cnt.rows : 0
+  if (frac > 0.25 && box.width * box.height < 2.5 * bounds.w * bounds.h) return true
+  // Почти весь блоб внутри зоны эталона (сам лист в bright-масках).
+  const area = Math.abs(cv.contourArea(cnt))
   const overlapW = Math.min(box.x + box.width, bounds.x + bounds.w) - Math.max(box.x, bounds.x)
   const overlapH = Math.min(box.y + box.height, bounds.y + bounds.h) - Math.max(box.y, bounds.y)
-  if (overlapW > 0 && overlapH > 0) {
-    const overlapArea = overlapW * overlapH
-    if (overlapArea > 0.3 * box.width * box.height) return true
-    // Почти весь блоб внутри зоны эталона.
-    const area = Math.abs(cv.contourArea(cnt))
-    if (area > 0 && overlapArea > 0.8 * area && area < 2.5 * bounds.w * bounds.h) return true
+  if (area > 0 && overlapW > 0 && overlapH > 0 && overlapW * overlapH > 0.8 * area && area < 2.5 * bounds.w * bounds.h) {
+    return true
   }
   const m = cv.moments(cnt)
   if (m.m00 > 0 && box.width * box.height < 2.5 * bounds.w * bounds.h) {
@@ -414,6 +423,12 @@ let currentGray: CvMat | null = null
 /** Комплексная оценка кандидата: форма + касание границ + позиция + размер. */
 function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameArea: number, frameH: number): number {
   let rank = 0
+  // Гигантские блобы (>40% кадра) — почти всегда слияние объекта с фоном
+  // (босая стопа на солнечном паркете). Стопа+голень — обычно 5–25%.
+  if (area > frameArea * 0.4) rank -= 2
+  // Мелкий блоб у края кадра — тень/мусор; не должен обыгрывать среднего
+  // кандидата со формой стопы.
+  if (touch >= 0.1 && area < frameArea * 0.02) rank -= 1
   // Side-ракурс: стопа тёмная/текстурная и ВЫТЯНУТАЯ горизонтально; лист на
   // полу — яркий, фон — часто полоса на всю ширину кадра.
   if (currentView === 'side') {
@@ -421,7 +436,7 @@ function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameAre
     const frameW = frameArea / frameH
     if (sBox.width > 4 && sBox.height > 4 && currentGray) {
       const roi = cv.mean(currentGray.roi({ x: sBox.x, y: sBox.y, width: sBox.width, height: sBox.height })) as unknown as ArrayLike<number>
-      if (frameMeanGray > 0 && roi[0] > frameMeanGray * 1.05) rank -= 2 // яркий — лист/фон
+      if (frameMeanGray > 0 && roi[0] > frameMeanGray * 1.35 + 10) rank -= 2 // белизна/лист, а не кожа
     }
     const sAspect = Math.max(sBox.width, sBox.height) / Math.max(1, Math.min(sBox.width, sBox.height))
     if (sAspect >= 2.2) rank += 0.5 // стопа сбоку — вытянутая («пятка-носок»)
@@ -512,7 +527,8 @@ function collectFootCandidates(
   frameArea: number,
   t: MatTracker,
   dbg?: FootDebug,
-  allowSplit = true
+  allowSplit = true,
+  checkRef = true
 ): FootCandidate[] {
   const contours = t.track(new cv.MatVector())
   const hierarchy = t.track(new cv.Mat())
@@ -538,7 +554,7 @@ function collectFootCandidates(
       cnt.delete()
       continue
     }
-    if (activeRefBounds && overlapsReference(cv, cnt, activeRefBounds)) {
+    if (checkRef && activeRefBounds && overlapsReference(cv, cnt, activeRefBounds)) {
       skipRef++
       cnt.delete()
       continue
@@ -557,7 +573,10 @@ function collectFootCandidates(
     const cand: FootCandidate = { contour: cnt, mask, area, borderTouch: touch, rank }
     out.push(cand)
     // Высокий блоб с сужением — вероятно «голень+стопа»: сразу пробуем отрезать.
-    if (allowSplit && box.height > 200 && box.height > 1.3 * box.width) {
+    // Сбоку нога+стопа почти квадратны — пробуем шире (max-width стратегия
+    // внутри splitFootFromLeg сама решит, есть где резать).
+    const tallEnough = box.height > 1.3 * box.width || (currentView === 'side' && box.height > 200 && box.width > 150)
+    if (allowSplit && box.height > 200 && tallEnough) {
       const cut = splitFootFromLeg(cv, cand, srcW, srcH, frameArea, t, dbg)
       if (cut) out.push(cut)
     }
@@ -602,8 +621,9 @@ function splitFootFromLeg(cv: Cv, cand: FootCandidate, srcW: number, srcH: numbe
   const footW = bottomSlice[Math.floor(bottomSlice.length / 2)]
   dbg?.onInfo?.('leg_split', { boxH: box.height, boxW: box.width, footW: Math.round(footW), cut: null })
   if (footW <= 20) return null
-  // Нет вытянутой голени — резать нечего.
-  if (box.height < 1.25 * footW) return null
+  // Нет вытянутой голени — резать нечего. Сбоку голень+стопа почти квадратны —
+  // порог ниже, чем сверху.
+  if (currentView !== 'side' && box.height < 1.25 * footW) return null
 
   // Сканируем снизу вверх: стопа — широкая часть внизу. Ищем устойчивое
   // сужение (щиколотку) выше неё; режем по нижней границе сужения.
@@ -618,6 +638,22 @@ function splitFootFromLeg(cv: Cv, cand: FootCandidate, srcW: number, srcH: numbe
       }
     } else {
       narrowRun = 0
+    }
+  }
+  if (cutIdx < 0 && currentView === 'side') {
+    // Стратегия для side: профиль «нога+стопа» не даёт сужения снизу (подошва
+    // — тонкая линия). Режем НАД строкой максимальной ширины: голень уже
+    // тела стопы, носок уже — оставляем массу ниже.
+    let maxW = 0
+    let maxIdx = 0
+    for (let i = 0; i < widths.length; i++) {
+      if (widths[i] > maxW) {
+        maxW = widths[i]
+        maxIdx = i
+      }
+    }
+    if (maxIdx > widths.length * 0.2 && maxIdx < widths.length * 0.85) {
+      cutIdx = maxIdx
     }
   }
   if (cutIdx < 0) return null // сужения нет — это и есть стопа
@@ -1066,6 +1102,45 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
         }
       }
       foot = betterCandidate(foot, consider(morph2, '3c_cooldark'))
+    }
+
+    // Шестой источник: кольца Canny-эджей (БЕЗ эрозии — кольцо тонкое).
+    // Босая стопа на солнечном паркете яркостно не отделяется (сливается с
+    // полом в гигантский блоб), но контур стопы — замкнутое кольцо эджей.
+    {
+      const edgeK = t.track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15)))
+      const edgeClosed = t.track(new cv.Mat())
+      cv.morphologyEx(edges, edgeClosed, cv.MORPH_CLOSE, edgeK)
+      stripBorders(cv, edgeClosed, borderStrip)
+      debug?.onMask('4_edge_rings', edgeClosed)
+      let edgeBest: FootCandidate | null = null
+      let edgeCount = 0
+      // checkRef=false: тонкое кольцо стопы может лежать прямо над листом —
+      // точки контура попадают в его прямоугольник. Кольцо самого листа —
+      // прямоугольник, ранкинг (extent) его отсекает.
+      for (const cand of collectFootCandidates(cv, edgeClosed, src.cols, src.rows, frameArea, t, debug, true, false)) {
+        cand.fullMask = edgeClosed
+        edgeCount++
+        edgeBest = betterCandidate(edgeBest, cand)
+      }
+      if (!edgeBest && sizeGateEnabled) {
+        // Fallback без размерного gate и без ref-exclusion (см. выше).
+        sizeGateEnabled = false
+        for (const cand of collectFootCandidates(cv, edgeClosed, src.cols, src.rows, frameArea, t, debug, true, false)) {
+          cand.fullMask = edgeClosed
+          edgeCount++
+          edgeBest = betterCandidate(edgeBest, cand)
+        }
+        sizeGateEnabled = true
+      }
+      debug?.onInfo?.('consider', { label: '4_edge_rings', candidates: edgeCount, bestRank: edgeBest?.rank ?? null })
+      // Кольца — fallback-only: на скриншотах находят кольца UI-элементов и
+      // обыгрывают реальную стопу. Используем, только если нормальные маски
+      // никого не дали.
+      if ((!foot || foot.rank < 1.5) && edgeBest) {
+        foot = betterCandidate(foot, edgeBest)
+        debug?.onInfo?.('edge_fallback', { rank: edgeBest.rank, areaPct: Math.round((edgeBest.area / frameArea) * 1000) / 10 })
+      }
     }
 
     // Отрезаем боковые приросты (предметы рядом с пяткой/носком).
