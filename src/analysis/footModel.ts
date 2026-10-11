@@ -62,8 +62,19 @@ export function buildFootModel(input: FootModelInput): FootModel {
     lengths.length >= 2 && Math.max(...lengths) - Math.min(...lengths) > LENGTH_INCONSISTENCY_MM
 
   const widthMm = top?.widthMm ?? null
-  const instepHeightMm = side?.instepHeightMm ?? null
   const ballWidthMm = front?.ballWidthMm ?? null
+
+  // Подъём: приоритет — относительный instepRatio из side × длина из top
+  // (side-ракурс эталон не требует). Иначе — готовые мм из side (нужен эталон).
+  const instepRatio =
+    side?.instepRatio ??
+    (side?.instepHeightMm != null && lengthMm !== null && lengthMm > 0
+      ? side.instepHeightMm / lengthMm
+      : null)
+  const instepHeightMm =
+    instepRatio !== null && lengthMm !== null && lengthMm > 0
+      ? Math.round(instepRatio * lengthMm * 10) / 10
+      : (side?.instepHeightMm ?? null)
 
   const widthRatio =
     widthMm !== null && lengthMm !== null && lengthMm > 0
@@ -72,8 +83,8 @@ export function buildFootModel(input: FootModelInput): FootModel {
 
   // Объём: instep/length и width/length.
   const scores: number[] = []
-  if (instepHeightMm !== null && lengthMm !== null && lengthMm > 0) {
-    scores.push(grade(instepHeightMm / lengthMm, 0.26, 0.36))
+  if (instepRatio !== null) {
+    scores.push(grade(instepRatio, 0.26, 0.36))
   }
   if (widthRatio !== null) {
     scores.push(grade(widthRatio, 0.38, 0.45))

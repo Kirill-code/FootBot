@@ -41,8 +41,12 @@ export interface FootMeasurement {
   lengthMm: number | null
   /** Ширина стопы (по minAreaRect), мм — ракурс top. */
   widthMm: number | null
-  /** Высота подъёма над линией пола, мм — ракурс side. */
+  /** Высота подъёма над линией пола, мм — ракурс side (нужен эталон). */
   instepHeightMm: number | null
+  /** Относительный подъём: высота контура над линией пола / длина контура (0..1).
+   *  Ракурс side БЕЗ эталона — перевод в мм делается в footModel через длину
+   *  из top-ракурса. */
+  instepRatio: number | null
   /** Ширина переднего отдела (ball), мм — ракурс front. */
   ballWidthMm: number | null
   /** Контур стопы (упрощённый hull) в пикселях кадра. */
@@ -157,7 +161,7 @@ interface ReferenceMatch {
 /** Сопоставляет квад с ближайшим эталоном. null — не подошёл ни один. */
 function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | null {
   // Печатная поверхность (коробка с текстом, журнал) — не эталон.
-  if (quad.internalEdgeDensity > 0.04) return null
+  if (quad.internalEdgeDensity > 0.03) return null
   const sides = sortedSides(quad.pts)
   const shortPx = (sides[0] + sides[1]) / 2
   if (shortPx < REF_MIN_SHORT_SIDE_PX) return null
@@ -285,9 +289,14 @@ function findReference(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: 
     const m = matchReference(cv, quad, dbg)
     if (m && (!best || m.score > best.score)) best = m
   }
-  // Слабый скор при умеренной яркости — сомнительный объект (коробка, рама),
-  // а не бумага: лучше честный «эталон не найден», чем ложная калибровка.
-  if (best && best.score < 0.3 && best.brightness < 225) return null
+  // Слабый скор при НЕсветлости относительно кадра — сомнительный объект
+  // (коробка, рама), а не бумага. Абсолютный порог яркости неверен: вечерний
+  // свет даёт белый лист brightness ~190. Печатные поверхности дополнительно
+  // ловит internalEdgeDensity.
+  if (best && best.score < 0.3) {
+    const frameMean = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
+    if (best.brightness < frameMean * 1.15 + 15) return null
+  }
   return best
 }
 
@@ -396,10 +405,28 @@ function looksLikeFoot(cv: Cv, cnt: CvMat, area: number, frameArea: number, fram
 let expectedFootAreaPx: number | null = null
 /** Жёсткий размерный отсев кандидатов (выключается как fallback, если все отсеяны). */
 let sizeGateEnabled = true
+/** Текущий ракурс и средняя яркость кадра — для view-aware ранкинга. */
+let currentView: FootView = 'top'
+let frameMeanGray = 0
+/** Grayscale кадра — для оценки яркости кандидатов (side-ракурс). */
+let currentGray: CvMat | null = null
 
 /** Комплексная оценка кандидата: форма + касание границ + позиция + размер. */
 function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameArea: number, frameH: number): number {
   let rank = 0
+  // Side-ракурс: стопа тёмная/текстурная и ВЫТЯНУТАЯ горизонтально; лист на
+  // полу — яркий, фон — часто полоса на всю ширину кадра.
+  if (currentView === 'side') {
+    const sBox = cv.boundingRect(cnt)
+    const frameW = frameArea / frameH
+    if (sBox.width > 4 && sBox.height > 4 && currentGray) {
+      const roi = cv.mean(currentGray.roi({ x: sBox.x, y: sBox.y, width: sBox.width, height: sBox.height })) as unknown as ArrayLike<number>
+      if (frameMeanGray > 0 && roi[0] > frameMeanGray * 1.05) rank -= 2 // яркий — лист/фон
+    }
+    const sAspect = Math.max(sBox.width, sBox.height) / Math.max(1, Math.min(sBox.width, sBox.height))
+    if (sAspect >= 2.2) rank += 0.5 // стопа сбоку — вытянутая («пятка-носок»)
+    if (sBox.width > frameW * 0.7 || sBox.height > frameH * 0.7) rank -= 1 // полоса фона
+  }
   if (looksLikeFoot(cv, cnt, area, frameArea, frameH)) rank += 2
   if (touch < 0.02) rank += 1
   else if (touch < 0.15) rank += 0.5
@@ -844,6 +871,7 @@ function extendHeelAlongAxis(
  */
 export function measureFoot(imageData: ImageData, options?: MeasureOptions, debug?: FootDebug): FootMeasurement {
   const view: FootView = options?.view ?? 'top'
+  currentView = view
   const cv = getOpenCv()
   const t = new MatTracker()
   try {
@@ -852,6 +880,8 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
 
     const gray = t.track(new cv.Mat())
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY)
+    currentGray = gray
+    frameMeanGray = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
     const blurred = t.track(new cv.Mat())
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0)
     // Сильное размытие для пороговой сегментации: гасит текстуру паркета,
@@ -1090,6 +1120,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       lengthMm: null,
       widthMm: null,
       instepHeightMm: null,
+      instepRatio: null,
       ballWidthMm: null,
       footContour: [],
       referenceFound: reference !== null,
@@ -1103,15 +1134,15 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     const hull = t.track(new cv.Mat())
     cv.convexHull(foot.contour, hull, false, true)
     const allHullPts = contourPoints(hull)
+    // Обрезка вершин у боковых краёв — только для top (срезы рамкой/тапок).
+    // В side стопа может легитимно упираться в края кадра.
     const xLo = 0.04 * src.cols
     const xHi = 0.96 * src.cols
-    const trimmed = allHullPts.filter((p) => p.x >= xLo && p.x <= xHi)
+    const trimmed = view === 'top' ? allHullPts.filter((p) => p.x >= xLo && p.x <= xHi) : allHullPts
     // Если обрезка съела почти весь контур (объект у края) — не обрезаем.
     const hullPts = trimmed.length >= 6 ? trimmed : allHullPts
     const step = Math.max(1, Math.floor(hullPts.length / 150))
     empty.footContour = hullPts.filter((_, i) => i % step === 0)
-
-    if (!reference) return empty
 
     // --- Общая метрика: длина (max pairwise по hull), кросс-проверка ракурсов ---
     let lengthPx = 0
@@ -1121,6 +1152,72 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
         if (d > lengthPx) lengthPx = d
       }
     }
+
+    if (view === 'side') {
+      // Side: эталон НЕ нужен. Лист на полу, снятый под углом — сплюснутая
+      // трапеция, ratio-проверку не проходит. Считаем ОТНОСИТЕЛЬНЫЙ подъём:
+      // высота контура над линией пола / длина контура (px). В мм переводит
+      // footModel через длину из top-ракурса.
+      const box = cv.boundingRect(foot.contour)
+      const floorBand = box.y + box.height * 0.93
+      let sx = 0
+      let sy = 0
+      let n = 0
+      for (const p of hullPts) {
+        if (p.y >= floorBand) {
+          sx += p.x
+          sy += p.y
+          n++
+        }
+      }
+      let instepPx = 0
+      if (n >= 3) {
+        const mx = sx / n
+        const my = sy / n
+        let sxy = 0
+        let sxx = 0
+        for (const p of hullPts) {
+          if (p.y >= floorBand) {
+            sxy += (p.x - mx) * (p.y - my)
+            sxx += (p.x - mx) * (p.x - mx)
+          }
+        }
+        const k = sxx > 1 ? sxy / sxx : 0
+        const b = my - k * mx
+        const denom = Math.sqrt(k * k + 1)
+        for (const p of hullPts) {
+          const d = (b + k * p.x - p.y) / denom // >0 выше линии (y вниз)
+          if (d > instepPx) instepPx = d
+        }
+      } else {
+        instepPx = Math.max(...hullPts.map((p) => p.y)) - Math.min(...hullPts.map((p) => p.y))
+      }
+      const ratio = lengthPx > 0 ? instepPx / lengthPx : 0
+      debug?.onInfo?.('side_debug', { instepPx: Math.round(instepPx), n, ratio: Math.round(ratio * 1000) / 1000 })
+      if (ratio >= 0.08 && ratio <= 0.6) {
+        empty.instepRatio = Math.round(ratio * 1000) / 1000
+      }
+      // Эталон найден (синтетика) — считаем и в мм для кросс-проверки.
+      if (reference) {
+        const lengthMmSide = lengthPx * reference.mmPerPx
+        if (lengthMmSide >= 120 && lengthMmSide <= 360) {
+          empty.lengthMm = Math.round(lengthMmSide * 10) / 10
+          const instepMm = instepPx * reference.mmPerPx
+          if (instepMm >= 30 && instepMm <= 200) {
+            empty.instepHeightMm = Math.round(instepMm * 10) / 10
+          }
+        } else {
+          debug?.onInfo?.('reference_rejected', { lengthMm: Math.round(lengthMmSide) })
+          empty.referenceFound = false
+          empty.referenceKind = null
+        }
+      }
+      debug?.onInfo?.('result_fields', { view, instep: empty.instepHeightMm, ratio: empty.instepRatio, len: empty.lengthMm })
+      return empty
+    }
+
+    if (!reference) return empty
+
     const lengthMm = lengthPx * reference.mmPerPx
 
     // Sanity-guard длины: нереальный размер => эталон скорее всего ложный.
@@ -1131,7 +1228,6 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       return empty
     }
     empty.lengthMm = Math.round(lengthMm * 10) / 10
-
     if (view === 'top') {
       // Продление пятки до манжеты джинсов (носок обрезан брючиной).
       const extended = extendHeelAlongAxis(src, hullPts, 0.22)
@@ -1174,51 +1270,6 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
         if (widthMm >= 40 && widthMm <= 320) {
           empty.widthMm = Math.round(Math.min(widthMm, lengthMm) * 10) / 10
         }
-      }
-    } else if (view === 'side') {
-      // Высота подъёма: максимальное расстояние точек контура над линией пола.
-      // Линия пола — МНК по нижним точкам (нижние ~7% bbox по y).
-      const box = cv.boundingRect(foot.contour)
-      const floorBand = box.y + box.height * 0.93
-      let sx = 0
-      let sy = 0
-      let n = 0
-      const hullPts2 = contourPoints(hull)
-      for (const p of hullPts2) {
-        if (p.y >= floorBand) {
-          sx += p.x
-          sy += p.y
-          n++
-        }
-      }
-      let instepPx = 0
-      if (n >= 3) {
-        const mx = sx / n
-        const my = sy / n
-        let sxy = 0
-        let sxx = 0
-        for (const p of hullPts2) {
-          if (p.y >= floorBand) {
-            sxy += (p.x - mx) * (p.y - my)
-            sxx += (p.x - mx) * (p.x - mx)
-          }
-        }
-        const k = sxx > 1 ? sxy / sxx : 0
-        const b = my - k * mx
-        const denom = Math.sqrt(k * k + 1)
-        for (const p of hullPts2) {
-          const d = (b + k * p.x - p.y) / denom // >0 выше линии (y вниз)
-          if (d > instepPx) instepPx = d
-        }
-      } else {
-        // fallback: над самой нижней точкой
-        const yMax = Math.max(...hullPts2.map((p) => p.y))
-        instepPx = yMax - Math.min(...hullPts2.map((p) => p.y))
-      }
-      const instepMm = instepPx * reference.mmPerPx
-      debug?.onInfo?.('side_debug', { instepPx: Math.round(instepPx), n, instepMm: Math.round(instepMm) })
-      if (instepMm >= 30 && instepMm <= 200) {
-        empty.instepHeightMm = Math.round(instepMm * 10) / 10
       }
     } else {
       // front: ширина переднего отдела — max ширина строки маски в более широкой

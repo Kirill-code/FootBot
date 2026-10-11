@@ -39,8 +39,8 @@ const STEPS: StepInfo[] = [
     view: 'side',
     title: 'Фото 2/2 — стопа сбоку',
     why: 'Сбоку измеряем высоту подъёма — она влияет на выбор модели кроссовок.',
-    noReferenceHint: 'Стопа найдена, но эталон не распознан. Положите лист А4 или карту на пол рядом со стопой (на той же линии пола) и переснимите.',
-    noFootHint: 'Стопа не найдена. Снимите сбоку, чтобы стопа целиком была в кадре и не сливалась с фоном.'
+    noReferenceHint: '',
+    noFootHint: 'Стопа не найдена. Снимите сбоку, чтобы стопа целиком была в кадре: видны и пятка, и носок, стопа стоит на полу.'
   }
 ]
 
@@ -140,13 +140,13 @@ function useLoadingProgress(active: boolean, done: boolean): number {
 /** Есть ли по ракурсу целевая метрика. */
 function viewMeasured(m: FootMeasurement | undefined, view: FootView): boolean {
   if (!m) return false
-  return view === 'top' ? m.lengthMm !== null && m.widthMm !== null : m.instepHeightMm !== null
+  return view === 'top' ? m.lengthMm !== null && m.widthMm !== null : m.instepRatio !== null || m.instepHeightMm !== null
 }
 
 /** Человекочитаемая причина неудачи ракурса. */
 function failureHint(m: FootMeasurement | undefined, step: StepInfo): string | null {
   if (!m || !m.footFound) return step.noFootHint
-  if (!viewMeasured(m, step.view)) return step.noReferenceHint
+  if (!viewMeasured(m, step.view)) return step.noReferenceHint || 'Не удалось измерить подъём — переснимите ракурс.'
   return null
 }
 
@@ -367,7 +367,9 @@ export default function ScanPage() {
                 <p className="hint" style={{ color: 'var(--accent)' }}>
                   {view === 'top'
                     ? <>Длина <strong>{m.lengthMm} мм</strong> · Ширина <strong>{m.widthMm} мм</strong></>
-                    : <>Высота подъёма <strong>{m.instepHeightMm} мм</strong> · Длина (кросс-проверка) {m.lengthMm} мм</>}
+                    : m.instepHeightMm !== null
+                      ? <>Высота подъёма <strong>{m.instepHeightMm} мм</strong>{m.lengthMm !== null && <> · Длина (кросс-проверка) {m.lengthMm} мм</>}</>
+                      : <>Подъём: <strong>{Math.round((m.instepRatio ?? 0) * 100)}% длины стопы</strong> (мм посчитаем после объединения с фото сверху)</>}
                 </p>
               ) : (
                 <p className="hint" style={{ color: 'var(--accent)' }}>{fail}</p>
@@ -452,10 +454,18 @@ export default function ScanPage() {
       <div className="card">
         <p style={{ margin: '0 0 6px', fontWeight: 600 }}>{stepInfo.title}</p>
         <p className="hint">{stepInfo.why}</p>
-        <p className="hint" style={{ marginTop: 6 }}>
-          Рядом со стопой положите лист А4 или банковскую карту — целиком в кадр, на одном
-          полу со стопой. Снимайте при хорошем свете.
-        </p>
+        {stepInfo.view === 'top' && (
+          <p className="hint" style={{ marginTop: 6 }}>
+            Рядом со стопой положите лист А4 или банковскую карту — целиком в кадр, на одном
+            полу со стопой. Снимайте при хорошем свете.
+          </p>
+        )}
+        {stepInfo.view === 'side' && (
+          <p className="hint" style={{ marginTop: 6 }}>
+            Лист не нужен — только стопа сбоку на фоне пола. Камера на уровне пола,
+            видны и пятка, и носок.
+          </p>
+        )}
       </div>
 
       <div className="card" style={{ display: 'flex', gap: 8 }}>
