@@ -1,4 +1,5 @@
 import { db } from '../profile/db'
+import type { VolumeHint } from '../profile/db'
 import type { Fit, Purpose } from '../catalog/types'
 
 /** Предпочтение посадки: вплотную или с запасом. */
@@ -10,6 +11,14 @@ export interface UserProfile {
   footLengthMm: number
   /** Ширина стопы, мм (если измерена). */
   footWidthMm?: number
+  /** Высота подъёма, мм (если измерена). */
+  instepHeightMm?: number
+  /** Ширина переднего отдела, мм (если измерена). */
+  ballWidthMm?: number
+  /** Отношение ширины к длине (если рассчитано). */
+  widthRatio?: number
+  /** Оценка объёма стопы из мультисъёмки. */
+  volumeHint?: VolumeHint
   /** Полнота стопы. */
   fullness: Fit
   /** Целевое назначение. */
@@ -28,9 +37,14 @@ function readStoredProfile(): StoredProfile | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<StoredProfile>
     if (typeof parsed.footLengthMm !== 'number' || parsed.footLengthMm <= 0) return null
+    const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
     return {
       footLengthMm: parsed.footLengthMm,
-      footWidthMm: typeof parsed.footWidthMm === 'number' ? parsed.footWidthMm : undefined,
+      footWidthMm: num(parsed.footWidthMm),
+      instepHeightMm: num(parsed.instepHeightMm),
+      ballWidthMm: num(parsed.ballWidthMm),
+      widthRatio: num(parsed.widthRatio),
+      volumeHint: parsed.volumeHint ?? undefined,
       fullness: parsed.fullness ?? 'medium',
       purpose: parsed.purpose ?? 'casual',
       fitPreference: parsed.fitPreference ?? 'comfort'
@@ -41,19 +55,48 @@ function readStoredProfile(): StoredProfile | null {
 }
 
 /**
- * Загружает профиль: длина/ширина — из последнего замера в Dexie,
- * полнота/назначение/посадка — из настроек в localStorage.
- * Если замеров нет — полный профиль из localStorage (ручной ввод).
+ * Загружает профиль. Приоритет — последняя модель стопы из Dexie (длина,
+ * ширина, подъём, ширина переднего отдела, объём); полнота/назначение/посадка
+ * — из настроек в localStorage. Если модели нет или в ней нет длины — старое
+ * поведение: последний замер measurements, иначе полный профиль из localStorage.
  */
 export async function loadProfile(): Promise<UserProfile | null> {
+  const stored = readStoredProfile()
+
+  let footModel: {
+    lengthMm: number | null
+    widthMm: number | null
+    instepHeightMm: number | null
+    ballWidthMm: number | null
+    widthRatio: number | null
+    volumeHint: VolumeHint | null
+  } | null = null
+  try {
+    footModel = (await db.footModels.orderBy('createdAt').reverse().first()) ?? null
+  } catch {
+    footModel = null
+  }
+
+  if (footModel && footModel.lengthMm != null) {
+    return {
+      footLengthMm: footModel.lengthMm,
+      footWidthMm: footModel.widthMm ?? undefined,
+      instepHeightMm: footModel.instepHeightMm ?? undefined,
+      ballWidthMm: footModel.ballWidthMm ?? undefined,
+      widthRatio: footModel.widthRatio ?? undefined,
+      volumeHint: footModel.volumeHint ?? undefined,
+      fullness: stored?.fullness ?? 'medium',
+      purpose: stored?.purpose ?? 'casual',
+      fitPreference: stored?.fitPreference ?? 'comfort'
+    }
+  }
+
   let measurement: { footLengthMm: number; footWidthMm: number } | null = null
   try {
     measurement = (await db.measurements.orderBy('createdAt').reverse().first()) ?? null
   } catch {
     measurement = null
   }
-
-  const stored = readStoredProfile()
 
   if (measurement) {
     return {
@@ -81,6 +124,10 @@ export function saveProfileSettings(settings: {
       JSON.stringify({
         footLengthMm: current?.footLengthMm,
         footWidthMm: current?.footWidthMm,
+        instepHeightMm: current?.instepHeightMm,
+        ballWidthMm: current?.ballWidthMm,
+        widthRatio: current?.widthRatio,
+        volumeHint: current?.volumeHint,
         ...settings
       } satisfies Partial<StoredProfile>)
     )

@@ -1,23 +1,55 @@
 import { useEffect, useRef, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
 import { loadOpenCv, subscribeOpenCvState, type OpenCvLoadState } from '../analysis/opencvLoader'
+import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
+import { buildFootModel, type FootModel } from '../analysis/footModel'
 
-// Скан стопы: фото → downscale → OpenCV (лениво) → измерение с калибровкой
-// по эталону (лист А4/А5 или банковская карта).
+// Мастер сканирования: 3 ракурса (сверху / сбоку / спереди 45°) → модель стопы.
 // OpenCV и модуль анализа грузятся динамически — в main-бандл не попадают.
 
 type Phase =
-  | 'idle' // готов к выбору фото
+  | 'idle' // шаг ожидает фото
   | 'loading-opencv' // загрузка wasm (~16 МБ)
   | 'analyzing' // анализ фото
-  | 'measured' // есть замер, сохранено
-  | 'no-reference' // стопа найдена, эталон не найден
+  | 'no-reference' // стопа есть, эталона нет
   | 'no-foot' // стопа не найдена
-  | 'engine-error' // ошибка загрузки/работы движка
-  | 'manual' // ручной ввод
+  | 'engine-error'
+  | 'done' // ракурс принят
 
 const MAX_DIM_PX = 1600
 const MAX_BLOB_BYTES = 1024 * 1024 // 1 МБ
+
+interface StepInfo {
+  view: FootView
+  title: string
+  hint: string
+  noReferenceHint: string
+  noFootHint: string
+}
+
+const STEPS: StepInfo[] = [
+  {
+    view: 'top',
+    title: 'Фото 1/3 — стопа сверху',
+    hint: 'Снимите стопу строго сверху. Рядом на полу положите лист А4 (или А5, или банковскую карту) — целиком в кадр.',
+    noReferenceHint: 'Стопа найдена, но эталон масштаба не распознан. Положите рядом со стопой лист А4 или банковскую карту (целиком в кадр) и переснимите.',
+    noFootHint: 'Стопа не найдена. Снимите строго сверху, вся стопа в кадре, на контрастном полу.'
+  },
+  {
+    view: 'side',
+    title: 'Фото 2/3 — стопа сбоку',
+    hint: 'Снимите стопу сбоку: стопа стоит на полу, лист А4 или карта лежат на полу рядом (на той же линии пола).',
+    noReferenceHint: 'Стопа найдена, но эталон не распознан. Положите лист А4 или карту на пол рядом со стопой и переснимите.',
+    noFootHint: 'Стопа не найдена. Снимите сбоку, чтобы стопа целиком была в кадре и не сливалась с фоном.'
+  },
+  {
+    view: 'front',
+    title: 'Фото 3/3 — стопа спереди под 45°',
+    hint: 'Снимите стопу спереди под углом ~45° (пальцы ближе к камере). Лист А4 или карта на полу рядом.',
+    noReferenceHint: 'Стопа найдена, но эталон не распознан. Положите лист А4 или карту рядом со стопой и переснимите.',
+    noFootHint: 'Стопа не найдена. Снимите спереди под 45°, вся стопа в кадре, на контрастном полу.'
+  }
+]
 
 /** Читает файл в ImageData + canvas, уменьшая до maxDim px. */
 async function fileToImageData(file: Blob, maxDim: number): Promise<{ imageData: ImageData; canvas: HTMLCanvasElement }> {
@@ -34,8 +66,12 @@ async function fileToImageData(file: Blob, maxDim: number): Promise<{ imageData:
   return { imageData: ctx.getImageData(0, 0, w, h), canvas }
 }
 
-/** Рисует превью фото с наложенным контуром стопы. */
-function drawPreview(canvas: HTMLCanvasElement, contour: Array<{ x: number; y: number }>) {
+/** Превью с наложенным контуром стопы. */
+function PreviewImage({ url }: { url: string }) {
+  return <img src={url} alt="Стопа с контуром" style={{ width: '100%', borderRadius: 10, display: 'block' }} />
+}
+
+function drawPreview(canvas: HTMLCanvasElement, contour: FootContourPoint[]): string {
   const preview = document.createElement('canvas')
   preview.width = canvas.width
   preview.height = canvas.height
@@ -83,7 +119,6 @@ function useLoadingProgress(active: boolean, done: boolean): number {
     }
     const started = Date.now()
     const timer = setInterval(() => {
-      // 16 МБ: на медленном мобильном — до 60 с. Ползём до 95%, не «зависая».
       const elapsed = (Date.now() - started) / 1000
       const estimate = Math.min(95, (elapsed / 45) * 100)
       setProgress((p) => Math.max(p, Math.round(estimate)))
@@ -93,26 +128,34 @@ function useLoadingProgress(active: boolean, done: boolean): number {
   return progress
 }
 
+/** Есть ли по ракурсу хоть одна метрика с эталоном. */
+function viewMeasured(m: FootMeasurement | undefined, view: FootView): boolean {
+  if (!m) return false
+  if (view === 'top') return m.lengthMm !== null && m.widthMm !== null
+  if (view === 'side') return m.instepHeightMm !== null
+  return m.ballWidthMm !== null
+}
+
 export default function ScanPage() {
   const inputRef = useRef<HTMLInputElement>(null)
   const [foot, setFoot] = useState<FootSide>('left')
+  const [step, setStep] = useState(0)
   const [phase, setPhase] = useState<Phase>('idle')
   const [cvState, setCvState] = useState<OpenCvLoadState>('idle')
-  const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState<{ lengthMm: number; widthMm: number } | null>(null)
+  const progress = useLoadingProgress(phase === 'loading-opencv', cvState === 'ready')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [errorText, setErrorText] = useState('')
-  const [manualLength, setManualLength] = useState('')
-  const [manualWidth, setManualWidth] = useState('')
+  const [measures, setMeasures] = useState<Partial<Record<FootView, FootMeasurement>>>({})
+  const [model, setModel] = useState<FootModel | null>(null)
+  const [finished, setFinished] = useState(false)
+  const [manualOpen, setManualOpen] = useState(false)
+  const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '', ballWidthMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
 
   useEffect(() => subscribeOpenCvState(setCvState), [])
-  const engineReady = cvState === 'ready'
-  const loadingProgress = useLoadingProgress(phase === 'loading-opencv', engineReady)
 
-  useEffect(() => {
-    setProgress(loadingProgress)
-  }, [loadingProgress])
+  const stepInfo = STEPS[step]
+  const busy = phase === 'loading-opencv' || phase === 'analyzing'
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -120,99 +163,230 @@ export default function ScanPage() {
     if (!file) return
 
     setPhase('loading-opencv')
-    setResult(null)
     setPreviewUrl(null)
     setErrorText('')
     try {
-      // 1. Загружаем OpenCV (лениво, singleton).
       await loadOpenCv()
-
-      // 2. Downscale фото.
       const { imageData, canvas } = await fileToImageData(file, MAX_DIM_PX)
 
-      // 3. Анализ — модуль тоже ленивый.
       setPhase('analyzing')
       const { measureFoot } = await import('../analysis/measureFoot')
-      const m = measureFoot(imageData)
+      const m = measureFoot(imageData, { view: stepInfo.view })
 
-      // Превью с контуром (если стопа найдена).
       if (m.footFound && m.footContour.length >= 3) {
         setPreviewUrl(drawPreview(canvas, m.footContour))
       }
 
-      if (m.referenceFound && m.lengthMm !== null && m.widthMm !== null) {
-        // 4а. Есть и эталон, и стопа — сохраняем фото + замер.
-        const lengthMm = m.lengthMm
-        const widthMm = m.widthMm
-        const blob = await canvasToBlob(canvas)
-        await db.transaction('rw', db.photos, db.measurements, async () => {
-          await db.photos.add({
-            foot,
-            createdAt: Date.now(),
-            blob,
-            footLengthMm: lengthMm,
-            footWidthMm: widthMm
-          })
-          await db.measurements.add({
-            createdAt: Date.now(),
-            footLengthMm: lengthMm,
-            footWidthMm: widthMm,
-            source: 'opencv',
-            contour: m.footContour
-          })
-        })
-        setResult({ lengthMm, widthMm })
-        setPhase('measured')
-      } else if (m.footFound) {
-        // 4б. Стопа есть, эталона нет — фото сохраняем, просим переснять с эталоном.
-        const blob = await canvasToBlob(canvas)
-        await db.photos.add({
-          foot,
-          createdAt: Date.now(),
-          blob,
-          footLengthMm: null,
-          footWidthMm: null
-        })
-        setPhase('no-reference')
-      } else {
+      if (!m.footFound) {
         setPhase('no-foot')
+        return
       }
+      if (!viewMeasured(m, stepInfo.view)) {
+        setPhase('no-reference')
+        return
+      }
+
+      // Ракурс принят: сохраняем фото (+ замер для top) и идём дальше.
+      const blob = await canvasToBlob(canvas)
+      await db.photos.add({
+        foot,
+        createdAt: Date.now(),
+        blob,
+        footLengthMm: m.lengthMm,
+        footWidthMm: m.widthMm
+      })
+      if (stepInfo.view === 'top' && m.lengthMm !== null) {
+        await db.measurements.add({
+          createdAt: Date.now(),
+          footLengthMm: m.lengthMm,
+          footWidthMm: m.widthMm ?? m.lengthMm * 0.4,
+          source: 'opencv',
+          contour: m.footContour
+        })
+      }
+      setMeasures((prev) => ({ ...prev, [stepInfo.view]: m }))
+      setPhase('done')
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : String(err))
       setPhase('engine-error')
     }
   }
 
+  function nextStep() {
+    setPreviewUrl(null)
+    setPhase('idle')
+    if (step < STEPS.length - 1) {
+      setStep(step + 1)
+    } else {
+      finish(measures)
+    }
+  }
+
+  function finish(current: Partial<Record<FootView, FootMeasurement>>) {
+    const m = buildFootModel(current)
+    setModel(m)
+    db.footModels.add({
+      foot,
+      createdAt: Date.now(),
+      lengthMm: m.lengthMm,
+      widthMm: m.widthMm,
+      instepHeightMm: m.instepHeightMm,
+      ballWidthMm: m.ballWidthMm,
+      widthRatio: m.widthRatio,
+      volumeHint: m.volumeHint,
+      inconsistent: m.inconsistent,
+      source: 'opencv'
+    })
+    setFinished(true)
+  }
+
+  function skipStep() {
+    const next = { ...measures }
+    delete next[stepInfo.view]
+    setMeasures(next)
+    setPreviewUrl(null)
+    setPhase('idle')
+    if (step < STEPS.length - 1) {
+      setStep(step + 1)
+    } else {
+      finish(next)
+    }
+  }
+
   async function handleManualSave() {
-    const lengthMm = Number(manualLength)
-    const widthMm = Number(manualWidth)
-    if (!Number.isFinite(lengthMm) || !Number.isFinite(widthMm) || lengthMm <= 0 || widthMm <= 0) {
-      setErrorText('Введите длину и ширину в миллиметрах')
+    const lengthMm = manual.lengthMm ? Number(manual.lengthMm) : null
+    const widthMm = manual.widthMm ? Number(manual.widthMm) : null
+    const instepHeightMm = manual.instepHeightMm ? Number(manual.instepHeightMm) : null
+    const ballWidthMm = manual.ballWidthMm ? Number(manual.ballWidthMm) : null
+    if ([lengthMm, widthMm, instepHeightMm, ballWidthMm].some((v) => v !== null && (!Number.isFinite(v) || v <= 0))) {
+      setErrorText('Введите положительные числа в миллиметрах')
+      return
+    }
+    if (lengthMm === null && model?.lengthMm == null) {
+      setErrorText('Укажите хотя бы длину стопы')
       return
     }
     setErrorText('')
-    await db.measurements.add({
+    const m = buildFootModel({
+      top: lengthMm !== null && widthMm !== null ? ({ lengthMm, widthMm } as FootMeasurement) : null,
+      side: instepHeightMm !== null && lengthMm !== null ? ({ lengthMm, instepHeightMm } as FootMeasurement) : null,
+      front: ballWidthMm !== null ? ({ lengthMm: lengthMm ?? 0, ballWidthMm } as FootMeasurement) : null
+    })
+    const merged: FootModel = {
+      ...m,
+      lengthMm: m.lengthMm ?? model?.lengthMm ?? null,
+      widthMm: m.widthMm ?? model?.widthMm ?? null,
+      instepHeightMm: m.instepHeightMm ?? model?.instepHeightMm ?? null,
+      ballWidthMm: m.ballWidthMm ?? model?.ballWidthMm ?? null
+    }
+    merged.widthRatio =
+      merged.widthMm !== null && merged.lengthMm !== null && merged.lengthMm > 0
+        ? Math.round((merged.widthMm / merged.lengthMm) * 100) / 100
+        : null
+    await db.footModels.add({
+      foot,
       createdAt: Date.now(),
-      footLengthMm: Math.round(lengthMm * 10) / 10,
-      footWidthMm: Math.round(widthMm * 10) / 10,
+      lengthMm: merged.lengthMm,
+      widthMm: merged.widthMm,
+      instepHeightMm: merged.instepHeightMm,
+      ballWidthMm: merged.ballWidthMm,
+      widthRatio: merged.widthRatio,
+      volumeHint: merged.volumeHint,
+      inconsistent: merged.inconsistent,
       source: 'manual'
     })
+    setModel(merged)
     setManualSaved(true)
   }
 
-  const busy = phase === 'loading-opencv' || phase === 'analyzing'
+  const volumeText = { low: 'низкий объём', medium: 'средний объём', high: 'высокий объём' } as const
+
+  if (finished && model) {
+    return (
+      <main className="page">
+        <h1 className="page-title">Модель {foot === 'left' ? 'левой' : 'правой'} стопы</h1>
+        <p className="page-subtitle">Собрано из {Object.keys(measures).length} из 3 ракурсов</p>
+
+        <div className="card" style={{ display: 'grid', gap: 6 }}>
+          {model.lengthMm !== null && <p className="hint">Длина: <strong>{model.lengthMm} мм</strong></p>}
+          {model.widthMm !== null && <p className="hint">Ширина: <strong>{model.widthMm} мм</strong></p>}
+          {model.instepHeightMm !== null && <p className="hint">Высота подъёма: <strong>{model.instepHeightMm} мм</strong></p>}
+          {model.ballWidthMm !== null && <p className="hint">Ширина переднего отдела: <strong>{model.ballWidthMm} мм</strong></p>}
+          {model.widthRatio !== null && <p className="hint">Отношение ширины к длине: <strong>{model.widthRatio}</strong></p>}
+          {model.volumeHint !== null && <p className="hint">Объём: <strong>{volumeText[model.volumeHint]}</strong></p>}
+          {model.inconsistent && (
+            <p className="hint" style={{ color: '#ff7a7a' }}>
+              Замеры ракурсов заметно различаются (более 15 мм) — рекомендуем переснять.
+            </p>
+          )}
+          <p className="hint" style={{ color: 'var(--accent)' }}>Сохранено в профиль</p>
+        </div>
+
+        {!manualOpen ? (
+          <button className="btn btn-secondary btn-block" onClick={() => { setManualOpen(true); setManualSaved(false); setErrorText('') }}>
+            Дополнить вручную
+          </button>
+        ) : (
+          <div className="card" style={{ display: 'grid', gap: 10 }}>
+            <p style={{ margin: 0, fontWeight: 600 }}>Ручной ввод (недостающие замеры)</p>
+            {[
+              ['lengthMm', 'Длина стопы, мм'],
+              ['widthMm', 'Ширина стопы, мм'],
+              ['instepHeightMm', 'Высота подъёма, мм'],
+              ['ballWidthMm', 'Ширина переднего отдела, мм']
+            ].map(([key, label]) => (
+              <label key={key} className="hint">
+                {label}
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="decimal"
+                  value={manual[key as keyof typeof manual]}
+                  onChange={(e) => setManual({ ...manual, [key]: e.target.value })}
+                  placeholder="оставьте пустым, если не знаете"
+                />
+              </label>
+            ))}
+            {errorText && <p className="hint" style={{ color: '#ff7a7a' }}>{errorText}</p>}
+            <button className="btn btn-block" disabled={manualSaved} onClick={handleManualSave}>
+              {manualSaved ? 'Сохранено в профиль' : 'Сохранить замер'}
+            </button>
+          </div>
+        )}
+
+        <button className="btn btn-block" onClick={() => { setFinished(false); setStep(0); setPhase('idle'); setMeasures({}); setPreviewUrl(null) }}>
+          Новое сканирование
+        </button>
+      </main>
+    )
+  }
 
   return (
     <main className="page">
       <h1 className="page-title">Скан стопы</h1>
-      <p className="page-subtitle">Фото стопы рядом с известным объектом — автоматический замер</p>
+      <p className="page-subtitle">Три ракурса — точная модель стопы</p>
+
+      <div className="card" style={{ display: 'flex', gap: 8 }}>
+        {STEPS.map((s, i) => (
+          <div
+            key={s.view}
+            className="btn btn-secondary btn-block"
+            style={{
+              padding: '8px 4px',
+              fontSize: 13,
+              borderColor: i === step ? 'var(--accent)' : 'var(--border)',
+              color: i === step ? 'var(--accent)' : i < step ? 'var(--accent)' : undefined,
+              opacity: i <= step ? 1 : 0.5
+            }}
+          >
+            {i < step ? '✓ ' : ''}{i + 1}
+          </div>
+        ))}
+      </div>
 
       <div className="card">
-        <p className="hint">
-          Как снимать: положите стопу на пол и рядом положите банковскую карту или лист А4/А5
-          (весь объект должен попасть в кадр). Снимайте строго сверху. Карта или лист задают
-          масштаб для измерений.
-        </p>
+        <p style={{ margin: '0 0 6px', fontWeight: 600 }}>{stepInfo.title}</p>
+        <p className="hint">{stepInfo.hint}</p>
       </div>
 
       <div className="card" style={{ display: 'flex', gap: 8 }}>
@@ -243,13 +417,31 @@ export default function ScanPage() {
         onChange={handleFile}
       />
 
-      <button className="btn btn-block" disabled={busy} onClick={() => inputRef.current?.click()}>
-        {phase === 'loading-opencv'
-          ? 'Загружаем движок анализа…'
-          : phase === 'analyzing'
-            ? 'Анализ фото…'
-            : `Сфотографировать ${foot === 'left' ? 'левую' : 'правую'} стопу`}
-      </button>
+      {phase === 'done' ? (
+        <>
+          <button className="btn btn-block" onClick={nextStep}>
+            {step < STEPS.length - 1 ? 'Далее' : 'Построить модель стопы'}
+          </button>
+          <button className="btn btn-secondary btn-block" onClick={() => { setPhase('idle'); setPreviewUrl(null) }}>
+            Переснять
+          </button>
+        </>
+      ) : (
+        <>
+          <button className="btn btn-block" disabled={busy} onClick={() => inputRef.current?.click()}>
+            {phase === 'loading-opencv'
+              ? 'Загружаем движок анализа…'
+              : phase === 'analyzing'
+                ? 'Анализ фото…'
+                : 'Сфотографировать'}
+          </button>
+          {phase !== 'idle' && (
+            <button className="btn btn-secondary btn-block" disabled={busy} onClick={skipStep}>
+              Пропустить ракурс
+            </button>
+          )}
+        </>
+      )}
 
       {phase === 'loading-opencv' && (
         <div className="card" style={{ display: 'grid', gap: 8 }}>
@@ -258,53 +450,23 @@ export default function ScanPage() {
             загрузка может занять до минуты.
           </p>
           <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
-            <div
-              style={{
-                height: '100%',
-                width: `${progress}%`,
-                background: 'var(--accent)',
-                transition: 'width 0.5s ease'
-              }}
-            />
+            <div style={{ height: '100%', width: `${progress}%`, background: 'var(--accent)', transition: 'width 0.5s ease' }} />
           </div>
           <p className="hint" style={{ textAlign: 'right' }}>{progress}%</p>
         </div>
       )}
 
-      {previewUrl && (
-        <div className="card" style={{ padding: 8 }}>
-          <img src={previewUrl} alt="Стопа с контуром" style={{ width: '100%', borderRadius: 10 }} />
-        </div>
-      )}
-
-      {phase === 'measured' && result && (
-        <div className="card">
-          <p style={{ margin: '0 0 8px', fontWeight: 600 }}>Результат измерения</p>
-          <p className="hint">
-            Длина: <strong>{result.lengthMm} мм</strong> · Ширина: <strong>{result.widthMm} мм</strong>
-          </p>
-          <p className="hint" style={{ color: 'var(--accent)', marginTop: 8 }}>
-            Сохранено в профиль
-          </p>
-        </div>
-      )}
+      {previewUrl && <PreviewImage url={previewUrl} />}
 
       {phase === 'no-reference' && (
         <div className="card">
-          <p className="hint" style={{ color: 'var(--accent)' }}>
-            Стопа найдена (контур на фото), но не найден эталон масштаба. Положите рядом со
-            стопой банковскую карту или лист А4 и переснимите — тогда приложение само
-            измерит стопу. Либо введите размеры вручную ниже.
-          </p>
+          <p className="hint" style={{ color: 'var(--accent)' }}>{stepInfo.noReferenceHint}</p>
         </div>
       )}
 
       {phase === 'no-foot' && (
         <div className="card">
-          <p className="hint" style={{ color: '#ff7a7a' }}>
-            Стопа не найдена на фото. Снимите строго сверху, чтобы вся стопа попала в кадр,
-            на контрастном полу (носок не должен сливаться с фоном), и попробуйте ещё раз.
-          </p>
+          <p className="hint" style={{ color: '#ff7a7a' }}>{stepInfo.noFootHint}</p>
         </div>
       )}
 
@@ -314,46 +476,6 @@ export default function ScanPage() {
             Не удалось загрузить или запустить движок анализа: {errorText}.
             Проверьте соединение (при первом запуске нужен интернет) и попробуйте снова.
           </p>
-        </div>
-      )}
-
-      {phase !== 'manual' ? (
-        <button className="btn btn-secondary btn-block" disabled={busy} onClick={() => { setPhase('manual'); setManualSaved(false); setManualLength(''); setManualWidth(''); setErrorText('') }}>
-          Ввести размеры вручную
-        </button>
-      ) : (
-        <div className="card" style={{ display: 'grid', gap: 10 }}>
-          <p style={{ margin: 0, fontWeight: 600 }}>Ручной ввод замера</p>
-          <label className="hint">
-            Длина стопы, мм
-            <input
-              className="input"
-              type="number"
-              inputMode="decimal"
-              min={50}
-              max={400}
-              value={manualLength}
-              onChange={(e) => setManualLength(e.target.value)}
-              placeholder="например, 265"
-            />
-          </label>
-          <label className="hint">
-            Ширина стопы, мм
-            <input
-              className="input"
-              type="number"
-              inputMode="decimal"
-              min={50}
-              max={300}
-              value={manualWidth}
-              onChange={(e) => setManualWidth(e.target.value)}
-              placeholder="например, 100"
-            />
-          </label>
-          {errorText && <p className="hint" style={{ color: '#ff7a7a' }}>{errorText}</p>}
-          <button className="btn btn-block" disabled={manualSaved} onClick={handleManualSave}>
-            {manualSaved ? 'Сохранено в профиль' : 'Сохранить замер'}
-          </button>
         </div>
       )}
     </main>

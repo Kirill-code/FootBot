@@ -28,11 +28,23 @@ export interface FootContourPoint {
 
 export type ReferenceKind = 'a4' | 'a5' | 'card'
 
+/** Ракурс съёмки: сверху / сбоку / спереди (45°). */
+export type FootView = 'top' | 'side' | 'front'
+
+/** Какие метрики наполняются по ракурсу:
+ *  top — lengthMm/widthMm; side — lengthMm (кросс-проверка) + instepHeightMm;
+ *  front — ballWidthMm (+ длина по hull для кросс-проверки). */
 export interface FootMeasurement {
+  /** Ракурс съёмки. */
+  view: FootView
   /** Длина стопы, мм (null, если нет эталона или стопы). */
   lengthMm: number | null
-  /** Ширина стопы, мм (null, если нет эталона или стопы). */
+  /** Ширина стопы (по minAreaRect), мм — ракурс top. */
   widthMm: number | null
+  /** Высота подъёма над линией пола, мм — ракурс side. */
+  instepHeightMm: number | null
+  /** Ширина переднего отдела (ball), мм — ракурс front. */
+  ballWidthMm: number | null
   /** Контур стопы (упрощённый hull) в пикселях кадра. */
   footContour: FootContourPoint[]
   /** Найден ли эталон для калибровки масштаба. */
@@ -41,6 +53,10 @@ export interface FootMeasurement {
   footFound: boolean
   /** Тип найденного эталона. */
   referenceKind: ReferenceKind | null
+}
+
+export interface MeasureOptions {
+  view?: FootView
 }
 
 interface ReferenceObject {
@@ -70,7 +86,7 @@ const REF_MIN_SHORT_SIDE_PX = 40
 const FOOT_MIN_AREA_FRAC = 0.01
 const FOOT_MAX_AREA_FRAC = 0.35
 /** Допустимое отношение длины стопы к ширине (по minAreaRect). */
-const FOOT_ASPECT_MIN = 1.2
+const FOOT_ASPECT_MIN = 1.05
 const FOOT_ASPECT_MAX = 6
 /** Отступ от границы кадра при проверке касания. */
 const BORDER_MARGIN_PX = 6
@@ -167,14 +183,20 @@ function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | n
       best = { kind: ref.kind, mmPerPx: ref.shortMm / shortPx, score, brightness, quad }
     }
   }
-  dbg?.onInfo?.('ref_quad', {
-    matched: best?.kind ?? null,
-    ratio: Math.round(ratio * 100) / 100,
-    brightness: Math.round(brightness),
-    density: Math.round(quad.internalEdgeDensity * 1000) / 1000,
-    isPoly: quad.isPoly,
-    score: best ? Math.round(best.score * 1000) / 1000 : null
-  })
+  if (best) {
+    const b = quadBounds(quad)
+    const sd = sortedSides(quad.pts).map((v) => Math.round(v))
+    dbg?.onInfo?.('ref_quad', {
+      matched: best.kind,
+      ratio: Math.round(ratio * 100) / 100,
+      brightness: Math.round(brightness),
+      bbox: [b.x, b.y, b.w, b.h],
+      sides: sd,
+      pts: quad.pts.map((p) => [p.x, p.y]),
+      isPoly: quad.isPoly,
+      score: Math.round(best.score * 1000) / 1000
+    })
+  }
   return best
 }
 
@@ -284,6 +306,9 @@ interface FootCandidate {
   mask: CvMat
   /** Полная (до эрозии) маска прохода — для морфологической реконструкции. */
   fullMask?: CvMat
+  /** Кандидат из дырок bright-маски: auxMask = сама bright-маска. */
+  isHole?: boolean
+  auxMask?: CvMat
   area: number
   /** Доля точек контура, касающихся границ кадра (0 — не касается). */
   borderTouch: number
@@ -294,22 +319,44 @@ interface FootCandidate {
 /** Прямоугольник квада эталона с запасом, или null. */
 let activeRefBounds: { x: number; y: number; w: number; h: number } | null = null
 
-/** Пересекается ли контур с зоной эталона (bbox-перекрытие или центроид внутри). */
+/** Пересекается ли контур с зоной эталона. Центроид-проверка — только для
+ * блобов близких к размеру эталона: у гигантских блобов (скриншотная рамка,
+ * сцена целиком) центроид часто случайно попадает в зону листа. */
 function overlapsReference(cv: Cv, cnt: CvMat, bounds: { x: number; y: number; w: number; h: number }): boolean {
-  const m = cv.moments(cnt)
-  if (m.m00 > 0) {
-    const cx = m.m10 / m.m00
-    const cy = m.m01 / m.m00
-    if (cx >= bounds.x - 20 && cx <= bounds.x + bounds.w + 20 && cy >= bounds.y - 20 && cy <= bounds.y + bounds.h + 20) {
-      return true
-    }
-  }
   const box = cv.boundingRect(cnt)
   const overlapW = Math.min(box.x + box.width, bounds.x + bounds.w) - Math.max(box.x, bounds.x)
   const overlapH = Math.min(box.y + box.height, bounds.y + bounds.h) - Math.max(box.y, bounds.y)
-  if (overlapW <= 0 || overlapH <= 0) return false
-  const overlapArea = overlapW * overlapH
-  return overlapArea > 0.3 * box.width * box.height
+  if (overlapW > 0 && overlapH > 0) {
+    const overlapArea = overlapW * overlapH
+    if (overlapArea > 0.3 * box.width * box.height) return true
+    // Почти весь блоб внутри зоны эталона.
+    const area = Math.abs(cv.contourArea(cnt))
+    if (area > 0 && overlapArea > 0.8 * area && area < 2.5 * bounds.w * bounds.h) return true
+  }
+  const m = cv.moments(cnt)
+  if (m.m00 > 0 && box.width * box.height < 2.5 * bounds.w * bounds.h) {
+    const cx = m.m10 / m.m00
+    const cy = m.m01 / m.m00
+    if (cx >= bounds.x - 10 && cx <= bounds.x + bounds.w + 10 && cy >= bounds.y - 10 && cy <= bounds.y + bounds.h + 10) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Обрезать полосу у границ маски. */
+function stripBorders(cv: Cv, mat: CvMat, m: number): void {
+  void cv
+  const w = mat.cols
+  const h = mat.rows
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < Math.min(m, w); x++) mat.ucharPtr(y, x)[0] = 0
+    for (let x = Math.max(0, w - m); x < w; x++) mat.ucharPtr(y, x)[0] = 0
+  }
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < Math.min(m, h); y++) mat.ucharPtr(y, x)[0] = 0
+    for (let y = Math.max(0, h - m); y < h; y++) mat.ucharPtr(y, x)[0] = 0
+  }
 }
 
 /** Доля точек контура в полосе у каждой границы кадра. */
@@ -347,6 +394,8 @@ function looksLikeFoot(cv: Cv, cnt: CvMat, area: number, frameArea: number, fram
 
 /** Ожидаемая площадь стопы в px (если есть эталон), иначе null. */
 let expectedFootAreaPx: number | null = null
+/** Жёсткий размерный отсев кандидатов (выключается как fallback, если все отсеяны). */
+let sizeGateEnabled = true
 
 /** Комплексная оценка кандидата: форма + касание границ + позиция + размер. */
 function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameArea: number, frameH: number): number {
@@ -362,6 +411,16 @@ function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameAre
     rank += 1 / (1 + 6 * err * err)
   }
   return rank
+}
+
+/** Возвращает лучшего из двух кандидатов (null-безопасно).
+ *  Дырки bright-маски получают бонус: их контур точный (без эрозии). */
+function betterCandidate(a: FootCandidate | null, b: FootCandidate | null): FootCandidate | null {
+  if (b === null) return a
+  if (a === null) return b
+  const aScore = a.rank + (a.isHole ? 0.5 : 0)
+  const bScore = b.rank + (b.isHole ? 0.5 : 0)
+  return bScore > aScore ? b : a
 }
 
 /**
@@ -433,20 +492,27 @@ function collectFootCandidates(
   cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
   const out: FootCandidate[] = []
+  let skipSmall = 0
+  let skipRef = 0
+  let skipGate = 0
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i)
     const area = cv.contourArea(cnt)
     if (area < frameArea * (FOOT_MIN_AREA_FRAC / 4)) {
+      skipSmall++
       cnt.delete()
       continue
     }
     // При наличии эталона: отсекаем объекты, чей размер несовместим со стопой
-    // (слипшаяся мебель, коробка, участки пола).
-    if (expectedFootAreaPx && expectedFootAreaPx > 0 && (area < 0.45 * expectedFootAreaPx || area > 2.2 * expectedFootAreaPx)) {
+    // (слипшаяся мебель, коробка, участки пола). Если отсев убивает всех —
+    // вызывающий код отключит его (fallback).
+    if (sizeGateEnabled && expectedFootAreaPx && expectedFootAreaPx > 0 && (area < 0.35 * expectedFootAreaPx || area > 3.0 * expectedFootAreaPx)) {
+      skipGate++
       cnt.delete()
       continue
     }
     if (activeRefBounds && overlapsReference(cv, cnt, activeRefBounds)) {
+      skipRef++
       cnt.delete()
       continue
     }
@@ -468,6 +534,9 @@ function collectFootCandidates(
       const cut = splitFootFromLeg(cv, cand, srcW, srcH, frameArea, t, dbg)
       if (cut) out.push(cut)
     }
+  }
+  if (dbg && (skipSmall || skipRef || skipGate)) {
+    dbg.onInfo?.('collect_skips', { total: contours.size(), small: skipSmall, ref: skipRef, gate: skipGate, gateOn: sizeGateEnabled })
   }
   return out
 }
@@ -631,6 +700,7 @@ function splitSideAttachment(
 function reconstructFoot(
   cv: Cv,
   cand: FootCandidate,
+  kernelGrow: CvMat,
   srcW: number,
   srcH: number,
   frameArea: number,
@@ -639,7 +709,6 @@ function reconstructFoot(
 ): FootCandidate | null {
   if (!cand.fullMask) return null
   // Мягкий возврат размера: ядро меньше эрозии — мосты не восстанавливаются.
-  const kernelGrow = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(15, 15)))
   const grown = t.track(new cv.Mat())
   cv.dilate(cand.mask, grown, kernelGrow)
   const refined = t.track(new cv.Mat())
@@ -653,11 +722,128 @@ function reconstructFoot(
 }
 
 /**
+ * Ректификация точек контура в миллиметры плоскости эталона.
+ * Гомография по 4 углам листа убирает перспективу/форшортенинг —
+ * иначе стопа, направленная от камеры, занижается на cos(угол).
+ * Возвращает точки в мм или null (квад без 4 реальных углов).
+ */
+function rectifyToReferencePlane(
+  cv: Cv,
+  quad: Quad,
+  shortMm: number,
+  longMm: number,
+  pts: FootContourPoint[],
+  t: MatTracker
+): FootContourPoint[] | null {
+  if (!quad.isPoly || quad.pts.length !== 4) return null
+  // Упорядочить углы: c0c1 — короткая сторона, c1c2 — длинная.
+  const P = quad.pts
+  const sd = [0, 1, 2, 3].map((i) => dist(P[i].x, P[i].y, P[(i + 1) % 4].x, P[(i + 1) % 4].y))
+  const order: FootContourPoint[] = []
+  // Найти старт, с которого чередование короткая→длинная
+  let start = 0
+  for (let i = 0; i < 4; i++) {
+    const a = sd[i]
+    const b = sd[(i + 1) % 4]
+    const c = sd[(i + 2) % 4]
+    if (a < b && c < b && a < sd[(i + 3) % 4]) {
+      start = i
+      break
+    }
+  }
+  for (let k = 0; k < 4; k++) order.push(P[(start + k) % 4])
+  // Если первая сторона оказалась длинной — сдвиг на одну вершину.
+  const ord =
+    dist(order[0].x, order[0].y, order[1].x, order[1].y) > dist(order[1].x, order[1].y, order[2].x, order[2].y)
+      ? [order[1], order[2], order[3], order[0]]
+      : order
+
+  const src = t.track(cv.matFromArray(4, 1, cv.CV_32FC2, ord.flatMap((q) => [q.x, q.y])))
+  const dst = t.track(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, shortMm, 0, shortMm, longMm, 0, longMm]))
+  const H = t.track(cv.getPerspectiveTransform(src, dst))
+  const inPts = t.track(cv.matFromArray(pts.length, 1, cv.CV_32FC2, pts.flatMap((q) => [q.x, q.y])))
+  const out = t.track(new cv.Mat())
+  cv.perspectiveTransform(inPts, out, H)
+  const res: FootContourPoint[] = []
+  for (let i = 0; i < out.rows; i++) {
+    const q = out.floatPtr(i, 0) as ArrayLike<number>
+    res.push({ x: q[0], y: q[1] })
+  }
+  return res
+}
+
+/**
+ * Продление пятки вдоль оси стопы до границы «не пол» (манжета джинсов).
+ * Носок частично закрыт брючиной — видимый контур обрезан по узорной части.
+ * Маршируем от обоих концов оси, берём конец, где быстро встречается
+ * не-паркет (не тёплый яркий пиксель). Возвращает точки-продления.
+ */
+function extendHeelAlongAxis(
+  src: CvMat,
+  hullPts: FootContourPoint[],
+  maxExtFrac: number
+): FootContourPoint[] {
+  if (hullPts.length < 4) return []
+  // Ось: пара с максимальным расстоянием.
+  let bi = 0
+  let bj = 0
+  let best = 0
+  for (let i = 0; i < hullPts.length; i++) {
+    for (let j = i + 1; j < hullPts.length; j++) {
+      const d = dist(hullPts[i].x, hullPts[i].y, hullPts[j].x, hullPts[j].y)
+      if (d > best) {
+        best = d
+        bi = i
+        bj = j
+      }
+    }
+  }
+  if (best < 30) return []
+  const maxExt = Math.min(90, best * maxExtFrac)
+  const isFloor = (x: number, y: number): boolean => {
+    const xi = Math.round(x)
+    const yi = Math.round(y)
+    if (xi < 0 || xi >= src.cols || yi < 0 || yi >= src.rows) return false
+    const q = src.ucharPtr(yi, xi) as ArrayLike<number>
+    const r = q[0]
+    const g = q[1]
+    const b = q[2]
+    // тёплый яркий (паркет/ламинат)
+    return r > 110 && r >= g && g >= b && r - b > 18
+  }
+  const march = (from: FootContourPoint, ux: number, uy: number): number => {
+    // Пересекаем ОДНУ узкую не-полосу (белые резинки носка, ~до 45px)
+    // и останавливаемся у начала широкой (манжета джинсов) — это пятка.
+    let bandStart = -1
+    for (let t = 6; t <= maxExt; t += 2) {
+      const floor = isFloor(from.x + ux * t, from.y + uy * t)
+      if (!floor && bandStart < 0) bandStart = t
+      if (floor && bandStart >= 0) {
+        const w = t - bandStart
+        if (w <= 45) return Math.min(bandStart + 45, maxExt) // резинки → до манжеты
+        return 0 // сразу широкий объект — продлевать нечего
+      }
+    }
+    // До конца дистанции не вышли на пол: полоса упирается в объект.
+    return bandStart >= 0 ? Math.min(bandStart + 45, maxExt) : 0
+  }
+  const ux = (hullPts[bj].x - hullPts[bi].x) / best
+  const uy = (hullPts[bj].y - hullPts[bi].y) / best
+  const extA = march(hullPts[bi], ux, uy)
+  const extB = march(hullPts[bj], -ux, -uy)
+  const out: FootContourPoint[] = []
+  if (extA > 10) out.push({ x: Math.round(hullPts[bi].x + ux * extA), y: Math.round(hullPts[bi].y + uy * extA) })
+  if (extB > 10) out.push({ x: Math.round(hullPts[bj].x - ux * extB), y: Math.round(hullPts[bj].y - uy * extB) })
+  return out
+}
+
+/**
  * Измеряет стопу по фото.
  * @returns замер; эталон и стопа ищутся независимо — см. флаги referenceFound/footFound.
  * @param debug опциональный колбэк для дампа промежуточных масок (харнесс).
  */
-export function measureFoot(imageData: ImageData, debug?: FootDebug): FootMeasurement {
+export function measureFoot(imageData: ImageData, options?: MeasureOptions, debug?: FootDebug): FootMeasurement {
+  const view: FootView = options?.view ?? 'top'
   const cv = getOpenCv()
   const t = new MatTracker()
   try {
@@ -688,45 +874,123 @@ export function measureFoot(imageData: ImageData, debug?: FootDebug): FootMeasur
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV)
 
     // --- Сегментация стопы ---
-    const kernel = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7, 7)))
+    // Размеры ядер — адаптивные: на маленьких кадрах крупная эрозия
+    // уничтожает саму стопу (носок 100px против кадра 720px).
+    const minDim = Math.min(src.cols, src.rows)
+    const odd = (n: number) => Math.max(3, Math.round(n) | 1)
+    const erodeSize = Math.min(45, Math.max(15, odd(minDim * 0.029)))
+    const growSize = Math.max(7, odd(minDim * 0.012))
+    const borderStrip = Math.max(8, Math.round(minDim * 0.01))
+    // Close адаптивен: лечит дырки текстуры (жаккард носка), но меньше
+    // типичных зазоров к соседним объектам (~3% кадра) — мосты не срастаются.
+    const closeSize = Math.min(13, Math.max(7, odd(minDim * 0.014)))
+    const kernel = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(closeSize, closeSize)))
     const kernelSmall = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3)))
-    const kernelErode = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(35, 35)))
+    const kernelErode = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(erodeSize, erodeSize)))
+    const kernelGrow = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(growSize, growSize)))
     const thresh = t.track(new cv.Mat())
     const morph = t.track(new cv.Mat())
+    const morph2 = t.track(new cv.Mat())
+    const morphHoles = t.track(new cv.Mat())
 
     let foot: FootCandidate | null = null
     const consider = (binary: CvMat, label: string): FootCandidate | null => {
       // Мягкий open (3×3) не разрушает текстуру носка, close лечит разрывы.
+      // ВАЖНО: in-place morphologyEx/erode в opencv-js — частичный no-op,
+      // каждая операция пишет в отдельный Mat.
       cv.morphologyEx(binary, morph, cv.MORPH_OPEN, kernelSmall)
-      cv.morphologyEx(morph, morph, cv.MORPH_CLOSE, kernel)
+      cv.morphologyEx(morph, morph2, cv.MORPH_CLOSE, kernel)
       // Обрезаем полосу у границ кадра: цепочки тёмных объектов вдоль края
       // (штаны → тапок → паркет) иначе сливаются в один бесполезный блоб.
-      const m = 12
-      for (let y = 0; y < morph.rows; y++) {
-        for (let x = 0; x < Math.min(m, morph.cols); x++) morph.ucharPtr(y, x)[0] = 0
-        for (let x = Math.max(0, morph.cols - m); x < morph.cols; x++) morph.ucharPtr(y, x)[0] = 0
-      }
-      for (let x = 0; x < morph.cols; x++) {
-        for (let y = 0; y < Math.min(m, morph.rows); y++) morph.ucharPtr(y, x)[0] = 0
-        for (let y = Math.max(0, morph.rows - m); y < morph.rows; y++) morph.ucharPtr(y, x)[0] = 0
-      }
+      stripBorders(cv, morph2, borderStrip)
       // Полная маска прохода — база для реконструкции после эрозии.
-      const fullMask = t.track(morph.clone())
+      const fullMask = t.track(morph2.clone())
       // Эрозия разрывает тонкие мосты к посторонним тёмным объектам.
-      cv.erode(morph, morph, kernelErode)
+      cv.erode(morph2, morph, kernelErode)
       debug?.onMask(label, morph)
       let best: FootCandidate | null = null
+      let n = 0
       for (const cand of collectFootCandidates(cv, morph, src.cols, src.rows, frameArea, t, debug)) {
         cand.fullMask = fullMask
+        n++
         if (!best || cand.rank > best.rank) best = cand
+      }
+      debug?.onInfo?.('consider', { label, candidates: n, bestRank: best?.rank ?? null })
+      // Fallback: размерный gate мог отсеять всех (редкий масштаб эталона).
+      if (!best && sizeGateEnabled) {
+        sizeGateEnabled = false
+        for (const cand of collectFootCandidates(cv, morph, src.cols, src.rows, frameArea, t, debug)) {
+          cand.fullMask = fullMask
+          if (!best || cand.rank > best.rank) best = cand
+        }
+        sizeGateEnabled = true
       }
       return best
     }
+    // Тёмные объекты на светлом фоне: берём ДЫРКИ bright-маски (тёмный остров
+    // внутри светлого — носок на паркете). Рамка/UI снаружи светлой области в
+    // дырки не попадают — гигантской связки тут не бывает. Слоты жаккардового
+    // узора сливаем close в единый блоб.
+    const healSize = Math.min(45, Math.max(9, odd(minDim * 0.05)))
+    const kernelHeal = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(healSize, healSize)))
+    const considerHoles = (binary: CvMat): FootCandidate | null => {
+      cv.morphologyEx(binary, morphHoles, cv.MORPH_OPEN, kernelSmall)
+      cv.morphologyEx(morphHoles, morph2, cv.MORPH_CLOSE, kernel)
+      stripBorders(cv, morph2, borderStrip)
+      // Собираем маску из дырок.
+      const hContours = t.track(new cv.MatVector())
+      const hHier = t.track(new cv.Mat())
+      cv.findContours(morph2, hContours, hHier, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE)
+      const holesMask = t.track(cv.Mat.zeros(src.rows, src.cols, cv.CV_8UC1))
+      for (let i = 0; i < hContours.size(); i++) {
+        const h = hHier.intPtr(0, i) as ArrayLike<number>
+        if (h[3] === -1) continue // только дырки
+        cv.drawContours(holesMask, hContours, i, new cv.Scalar(255), cv.FILLED)
+        // Дочерние островки (белые резинки носка внутри дырки) — вернуть
+        // в силуэт, иначе контур обрезается по узорной части.
+        let child = h[2]
+        while (child !== -1) {
+          cv.drawContours(holesMask, hContours, child, new cv.Scalar(255), cv.FILLED)
+          child = (hHier.intPtr(0, child) as ArrayLike<number>)[0]
+        }
+      }
+      cv.morphologyEx(holesMask, morphHoles, cv.MORPH_CLOSE, kernelHeal)
+      debug?.onMask('2b_dark_on_bright', morphHoles)
+      const brightMask = t.track(morph2.clone())
+      let best: FootCandidate | null = null
+      let n = 0
+      for (const cand of collectFootCandidates(cv, morphHoles, src.cols, src.rows, frameArea, t, debug)) {
+        cand.fullMask = morphHoles
+        cand.isHole = true
+        cand.auxMask = brightMask
+        n++
+        if (!best || cand.rank > best.rank) best = cand
+      }
+      debug?.onInfo?.('consider', { label: '2b_dark_on_bright', candidates: n, bestRank: best?.rank ?? null })
+      if (!best && sizeGateEnabled) {
+        sizeGateEnabled = false
+        for (const cand of collectFootCandidates(cv, morphHoles, src.cols, src.rows, frameArea, t, debug)) {
+          cand.fullMask = morphHoles
+          if (!best || cand.rank > best.rank) best = cand
+        }
+        sizeGateEnabled = true
+      }
+      return best
+    }
+    const notBrightFull = t.track(new cv.Mat())
+    {
+      const threshBright = t.track(new cv.Mat())
+      cv.threshold(blurredBig, threshBright, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+      const mb = t.track(new cv.Mat())
+      cv.medianBlur(threshBright, mb, 5)
+      cv.bitwise_not(mb, notBrightFull)
+      foot = betterCandidate(foot, considerHoles(threshBright))
+    }
+
     for (const inv of [false, true]) {
       const flag = (inv ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY) + cv.THRESH_OTSU
       cv.threshold(blurredBig, thresh, 0, 255, flag)
-      const c = consider(thresh, inv ? '3_binary_dark' : '2_binary_bright')
-      if (c && (!foot || c.rank > foot.rank)) foot = c
+      foot = betterCandidate(foot, consider(thresh, inv ? '3_binary_dark' : '2_binary_bright'))
     }
     // Третий источник: kmeans-разделение яркости (тёмный класс),
     // минус «тёплые» пиксели (паркет, доски, кожа) — иначе тёмный пол
@@ -743,14 +1007,64 @@ export function measureFoot(imageData: ImageData, debug?: FootDebug): FootMeasur
       cv.bitwise_not(warm, notWarm)
       const cool = t.track(new cv.Mat())
       cv.bitwise_and(km, notWarm, cool)
-      const c = consider(cool, '3b_kmeans_dark')
-      if (c && (!foot || c.rank > foot.rank)) foot = c
+      foot = betterCandidate(foot, consider(cool, '3b_kmeans_dark'))
+    }
+
+    // Пятый источник: тёмный холодный насыщенный (носок navy).
+    // Джинсы исключены по V (яркие), безель/UI по S (не насыщенные).
+    // Крупный close срастает полосы жаккарда в единый блоб.
+    {
+      const coolDark = t.track(new cv.Mat())
+      const lo = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [80, 35, 0, 0])
+      const hi = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [150, 255, 158, 0])
+      cv.inRange(hsv, lo, hi, coolDark)
+      lo.delete()
+      hi.delete()
+      cv.morphologyEx(coolDark, morph2, cv.MORPH_CLOSE, kernelHeal)
+      // Залить мелкие дырки (белые резинки носка внутри блоба).
+      {
+        const cContours = t.track(new cv.MatVector())
+        const cHier = t.track(new cv.Mat())
+        cv.findContours(morph2, cContours, cHier, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE)
+        for (let i = 0; i < cContours.size(); i++) {
+          const ch = cHier.intPtr(0, i) as ArrayLike<number>
+          if (ch[3] === -1) continue
+          const ca = Math.abs(cv.contourArea(cContours.get(i)))
+          if (ca > 0 && ca < frameArea * 0.25) {
+            cv.drawContours(morph2, cContours, i, new cv.Scalar(255), cv.FILLED)
+          }
+        }
+      }
+      foot = betterCandidate(foot, consider(morph2, '3c_cooldark'))
     }
 
     // Отрезаем боковые приросты (предметы рядом с пяткой/носком).
     if (foot) {
       const splitC = splitSideAttachment(cv, foot, src.cols, src.rows, frameArea, t, debug)
       if (splitC && splitC.rank >= foot.rank) foot = splitC
+    }
+
+    // Изолированная маленькая стопа на светлом фоне (носок, контур строго
+    // по тёмному) короче анатомической: расширяем в прилегающую тёмную одежду
+    // у щиколотки — дилатация + пересечение с тёмной частью кадра.
+    // Ограничения: top-view, area < 3% кадра, без касания границ (иначе это
+    // крупные сцены 12-xx или обрезки у края — там расширение вредно).
+    if (view === 'top' && foot && foot.area < frameArea * 0.03 && foot.borderTouch < 0.02) {
+      const growK = Math.min(45, Math.max(15, odd(minDim * 0.06)))
+      const kernelExtend = t.track(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(growK, growK)))
+      const dilated = t.track(new cv.Mat())
+      cv.dilate(foot.mask, dilated, kernelExtend)
+      const addition = t.track(new cv.Mat())
+      cv.bitwise_and(dilated, notBrightFull, addition)
+      const grownMask = t.track(new cv.Mat())
+      cv.bitwise_or(foot.mask, addition, grownMask)
+      const grownCands = collectFootCandidates(cv, grownMask, src.cols, src.rows, frameArea, t, undefined, false)
+      for (const c of grownCands) {
+        if (c.area >= foot.area * 0.95) {
+          foot = c
+          break
+        }
+      }
     }
 
     // Отрезаем голень по «щиколотке», если она попала в кадр.
@@ -762,17 +1076,21 @@ export function measureFoot(imageData: ImageData, debug?: FootDebug): FootMeasur
 
     // Реконструкция: отделяем стопу от слипшихся тёмных объектов.
     if (foot) {
-      const reconstructed = reconstructFoot(cv, foot, src.cols, src.rows, frameArea, t, debug)
+      const reconstructed = reconstructFoot(cv, foot, kernelGrow, src.cols, src.rows, frameArea, t, debug)
       if (reconstructed && reconstructed.rank > foot.rank) foot = reconstructed
     }
     activeRefBounds = null
     expectedFootAreaPx = null
     debug?.onMask('5_foot_final', foot?.mask ?? morph)
-    debug?.onInfo?.('foot_chosen', foot ? { rank: foot.rank, areaPct: Math.round((foot.area / frameArea) * 1000) / 10, touch: Math.round(foot.borderTouch * 100) / 100 } : { none: true })
+    debug?.onInfo?.('expected_area', { expected: expectedFootAreaPx, frameArea })
+    debug?.onInfo?.('foot_chosen', foot ? { rank: foot.rank, areaPct: Math.round((foot.area / frameArea) * 1000) / 10, touch: Math.round(foot.borderTouch * 100) / 100, isHole: !!foot.isHole } : { none: true })
 
     const empty: FootMeasurement = {
+      view,
       lengthMm: null,
       widthMm: null,
+      instepHeightMm: null,
+      ballWidthMm: null,
       footContour: [],
       referenceFound: reference !== null,
       footFound: foot !== null && foot.rank >= 1.5,
@@ -795,8 +1113,7 @@ export function measureFoot(imageData: ImageData, debug?: FootDebug): FootMeasur
 
     if (!reference) return empty
 
-    // --- Измерения ---
-    // Длина: максимальное попарное расстояние по hull.
+    // --- Общая метрика: длина (max pairwise по hull), кросс-проверка ракурсов ---
     let lengthPx = 0
     for (let i = 0; i < hullPts.length; i++) {
       for (let j = i + 1; j < hullPts.length; j++) {
@@ -804,25 +1121,135 @@ export function measureFoot(imageData: ImageData, debug?: FootDebug): FootMeasur
         if (d > lengthPx) lengthPx = d
       }
     }
-    // Ширина: малая сторона bounding box минимальной площади.
-    const rect = cv.minAreaRect(foot.contour)
-    const widthPx = Math.min(rect.size.width, rect.size.height)
+    const lengthMm = lengthPx * reference.mmPerPx
 
-    let lengthMm = lengthPx * reference.mmPerPx
-    let widthMm = widthPx * reference.mmPerPx
-    if (widthMm > lengthMm) [lengthMm, widthMm] = [widthMm, lengthMm]
-
-    // Sanity-guard: нереальный размер => эталон скорее всего ложный
-    // (коробка/радиатор похожи на А4). Калибровку отбрасываем, контур стопы сохраняем.
-    if (lengthMm < 120 || lengthMm > 360 || widthMm < 40 || widthMm > 320) {
-      debug?.onInfo?.('reference_rejected', { lengthMm: Math.round(lengthMm), widthMm: Math.round(widthMm) })
+    // Sanity-guard длины: нереальный размер => эталон скорее всего ложный.
+    if (lengthMm < 120 || lengthMm > 360) {
+      debug?.onInfo?.('reference_rejected', { lengthMm: Math.round(lengthMm) })
       empty.referenceFound = false
       empty.referenceKind = null
       return empty
     }
-
     empty.lengthMm = Math.round(lengthMm * 10) / 10
-    empty.widthMm = Math.round(widthMm * 10) / 10
+
+    if (view === 'top') {
+      // Продление пятки до манжеты джинсов (носок обрезан брючиной).
+      const extended = extendHeelAlongAxis(src, hullPts, 0.22)
+      if (extended.length > 0) {
+        hullPts.push(...extended)
+        debug?.onInfo?.('heel_extend', { pts: extended.length })
+      }
+      // Ректификация в плоскость эталона (убирает перспективу).
+      const refObj = REFERENCES.find((r) => r.kind === reference.kind)!
+      const rectified = rectifyToReferencePlane(cv, reference.quad, refObj.shortMm, refObj.shortMm * refObj.ratio, hullPts, t)
+      if (rectified && rectified.length >= 4) {
+        let lenPx2 = 0
+        let maxW = 0
+        for (let i = 0; i < rectified.length; i++) {
+          for (let j = i + 1; j < rectified.length; j++) {
+            const d = dist(rectified[i].x, rectified[i].y, rectified[j].x, rectified[j].y)
+            if (d > lenPx2) lenPx2 = d
+          }
+          // поперечник через точку: max расстояние до другой точки ~ ширина
+        }
+        // Ширина: minAreaRect по ректифицированным точкам (в мм).
+        const rm = t.track(cv.matFromArray(rectified.length, 1, cv.CV_32FC2, rectified.flatMap((q) => [q.x, q.y])))
+        const rrect = cv.minAreaRect(rm)
+        maxW = Math.min(rrect.size.width, rrect.size.height)
+        const lenR = lenPx2
+        const widR = maxW
+        debug?.onInfo?.('rectified', { len: Math.round(lenR), wid: Math.round(widR) })
+        if (lenR >= 120 && lenR <= 360 && lenR > lengthMm * 0.85) {
+          // Ректификация адекватна — берём её (длиннее = ближе к истине при наклоне).
+          empty.lengthMm = Math.round(lenR * 10) / 10
+          if (widR >= 40 && widR <= 320) {
+            empty.widthMm = Math.round(Math.min(widR, lenR) * 10) / 10
+          }
+        } else if (widR >= 40 && widR <= 320) {
+          empty.widthMm = Math.round(Math.min(widR, lengthMm) * 10) / 10
+        }
+      } else {
+        const rect = cv.minAreaRect(foot.contour)
+        const widthMm = Math.min(rect.size.width, rect.size.height) * reference.mmPerPx
+        if (widthMm >= 40 && widthMm <= 320) {
+          empty.widthMm = Math.round(Math.min(widthMm, lengthMm) * 10) / 10
+        }
+      }
+    } else if (view === 'side') {
+      // Высота подъёма: максимальное расстояние точек контура над линией пола.
+      // Линия пола — МНК по нижним точкам (нижние ~7% bbox по y).
+      const box = cv.boundingRect(foot.contour)
+      const floorBand = box.y + box.height * 0.93
+      let sx = 0
+      let sy = 0
+      let n = 0
+      const hullPts2 = contourPoints(hull)
+      for (const p of hullPts2) {
+        if (p.y >= floorBand) {
+          sx += p.x
+          sy += p.y
+          n++
+        }
+      }
+      let instepPx = 0
+      if (n >= 3) {
+        const mx = sx / n
+        const my = sy / n
+        let sxy = 0
+        let sxx = 0
+        for (const p of hullPts2) {
+          if (p.y >= floorBand) {
+            sxy += (p.x - mx) * (p.y - my)
+            sxx += (p.x - mx) * (p.x - mx)
+          }
+        }
+        const k = sxx > 1 ? sxy / sxx : 0
+        const b = my - k * mx
+        const denom = Math.sqrt(k * k + 1)
+        for (const p of hullPts2) {
+          const d = (b + k * p.x - p.y) / denom // >0 выше линии (y вниз)
+          if (d > instepPx) instepPx = d
+        }
+      } else {
+        // fallback: над самой нижней точкой
+        const yMax = Math.max(...hullPts2.map((p) => p.y))
+        instepPx = yMax - Math.min(...hullPts2.map((p) => p.y))
+      }
+      const instepMm = instepPx * reference.mmPerPx
+      debug?.onInfo?.('side_debug', { instepPx: Math.round(instepPx), n, instepMm: Math.round(instepMm) })
+      if (instepMm >= 30 && instepMm <= 200) {
+        empty.instepHeightMm = Math.round(instepMm * 10) / 10
+      }
+    } else {
+      // front: ширина переднего отдела — max ширина строки маски в более широкой
+      // половине bbox (передний отдел шире пятки).
+      const box = cv.boundingRect(foot.contour)
+      const midY = box.y + box.height / 2
+      const rowWidth = (from: number, to: number): number => {
+        let best = 0
+        for (let y = Math.max(0, from); y < Math.min(foot.mask!.rows, to); y++) {
+          let x0 = -1
+          let x1 = -1
+          for (let x = 0; x < foot.mask!.cols; x++) {
+            if (foot.mask!.ucharPtr(y, x)[0] > 0) {
+              if (x0 < 0) x0 = x
+              x1 = x
+            }
+          }
+          if (x0 >= 0 && x1 - x0 > best) best = x1 - x0
+        }
+        return best
+      }
+      const topW = rowWidth(box.y, Math.floor(midY))
+      const bottomW = rowWidth(Math.ceil(midY), box.y + box.height)
+      const ballPx = Math.max(topW, bottomW)
+      const ballMm = ballPx * reference.mmPerPx
+      debug?.onInfo?.('front_debug', { ballPx, topW, bottomW, ballMm: Math.round(ballMm) })
+      if (ballMm >= 60 && ballMm <= 200) {
+        empty.ballWidthMm = Math.round(ballMm * 10) / 10
+      }
+    }
+    debug?.onInfo?.('result_fields', { view, instep: empty.instepHeightMm, ball: empty.ballWidthMm, len: empty.lengthMm })
     return empty
   } finally {
     t.dispose()

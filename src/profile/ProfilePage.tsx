@@ -29,11 +29,30 @@ function PhotoItem({ blob, foot, createdAt, footLengthMm, footWidthMm }: { blob:
 
 export default function ProfilePage() {
   const photos = useLiveQuery(() => db.photos.orderBy('createdAt').reverse().toArray(), [])
+  const model = useLiveQuery(() => db.footModels.orderBy('createdAt').reverse().first(), [])
+
+  const volumeText = { low: 'низкий', medium: 'средний', high: 'высокий' } as const
 
   return (
     <main className="page">
       <h1 className="page-title">Профиль</h1>
       <p className="page-subtitle">Ваши фото стоп и замеры</p>
+
+      {model && (
+        <div className="card" style={{ display: 'grid', gap: 6 }}>
+          <p style={{ margin: 0, fontWeight: 600 }}>Модель стопы</p>
+          <p className="hint">
+            {model.lengthMm !== null && <>Длина <strong>{model.lengthMm} мм</strong> · </>}
+            {model.widthMm !== null && <>ширина <strong>{model.widthMm} мм</strong> · </>}
+            {model.instepHeightMm !== null && <>подъём <strong>{model.instepHeightMm} мм</strong> · </>}
+            {model.ballWidthMm !== null && <>передний отдел <strong>{model.ballWidthMm} мм</strong> · </>}
+            {model.volumeHint !== null && <>объём: <strong>{volumeText[model.volumeHint]}</strong></>}
+          </p>
+          {model.inconsistent && (
+            <p className="hint" style={{ color: '#ff7a7a' }}>Замеры ракурсов различаются — пересните.</p>
+          )}
+        </div>
+      )}
 
       {photos === undefined ? (
         <p className="hint">Загрузка…</p>

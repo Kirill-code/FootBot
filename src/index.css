@@ -323,3 +323,67 @@ a {
   font-weight: 700;
   background: rgba(74, 222, 128, 0.08);
 }
+
+/* ---------- Раскладка оценки (breakdown) ---------- */
+
+.shoe-card-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.compat-details summary {
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.score-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.score-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.score-bar-label {
+  width: 76px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.score-bar-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.score-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.score-bar-value {
+  width: 34px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-dim);
+}
+
+.compat-notes {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}

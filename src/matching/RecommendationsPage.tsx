@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { loadCatalog } from '../catalog/catalogApi'
 import type { Fit, Purpose, ShoeModel } from '../catalog/types'
 import ShoeCard from '../ui/ShoeCard'
+import BreakdownBars from '../ui/BreakdownBars'
 import { scoreModel } from './scoring'
 import type { ScoreResult } from './scoring'
 import { loadProfile, saveManualProfile } from './profile'
@@ -154,7 +155,8 @@ export default function RecommendationsPage() {
         <div className="card">
           <p className="hint">
             Длина стопы: {profile.footLengthMm} мм
-            {profile.footWidthMm != null && ` · Ширина: ${profile.footWidthMm} мм`} ·{' '}
+            {profile.footWidthMm != null && ` · Ширина: ${profile.footWidthMm} мм`}
+            {profile.instepHeightMm != null && ` · Подъём: ${profile.instepHeightMm} мм`} ·{' '}
             {FULLNESS_OPTIONS.find((o) => o.value === profile.fullness)?.label.toLowerCase()} полнота ·{' '}
             {PURPOSE_OPTIONS.find((o) => o.value === profile.purpose)?.label.toLowerCase()}
           </p>
@@ -168,15 +170,27 @@ export default function RecommendationsPage() {
         <>
           <div className="shoe-grid">
             {results.map(({ model, result }) => (
-              <Link key={model.id} to={`/catalog/${model.id}`}>
-                <ShoeCard
-                  model={model}
-                  score={result.score}
-                  verdict={result.verdict}
-                  recommendedUs={formatUs(result.recommendedUs)}
-                  recommendedEu={result.recommendedEu}
-                />
-              </Link>
+              <div key={model.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Link to={`/catalog/${model.id}`}>
+                  <ShoeCard
+                    model={model}
+                    score={result.score}
+                    verdict={result.verdict}
+                    recommendedUs={formatUs(result.recommendedUs)}
+                    recommendedEu={result.recommendedEu}
+                  />
+                </Link>
+                {result.notes.length > 0 && (
+                  <p className="shoe-card-note">
+                    {result.notes.slice(0, 2).join(' · ')}
+                    {result.notes.length > 2 && '…'}
+                  </p>
+                )}
+                <details className="compat-details">
+                  <summary>Детали оценки</summary>
+                  <BreakdownBars breakdown={result.breakdown} />
+                </details>
+              </div>
             ))}
           </div>
           <p className="hint">

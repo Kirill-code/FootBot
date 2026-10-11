@@ -7,6 +7,7 @@
     "fit": "wide",
     "last": "wide",
     "fitAdjustment": -0.5,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 6,
@@ -69,6 +70,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "medium",
     "sizeChart": [
       {
         "us": 6,
@@ -131,6 +133,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 7,
@@ -187,6 +190,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,
@@ -249,6 +253,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,
@@ -311,6 +316,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,
@@ -373,6 +379,7 @@
     "fit": "wide",
     "last": "wide",
     "fitAdjustment": -0.5,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 6,
@@ -435,6 +442,7 @@
     "fit": "wide",
     "last": "wide",
     "fitAdjustment": -0.5,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 6,
@@ -497,6 +505,7 @@
     "fit": "wide",
     "last": "wide",
     "fitAdjustment": 0,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 6,
@@ -559,6 +568,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0.5,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,
@@ -621,6 +631,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "medium",
     "sizeChart": [
       {
         "us": 6,
@@ -683,6 +694,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "medium",
     "sizeChart": [
       {
         "us": 6,
@@ -745,6 +757,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 6,
@@ -807,6 +820,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "high",
     "sizeChart": [
       {
         "us": 6,
@@ -869,6 +883,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0.5,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,
@@ -931,6 +946,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0.5,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,
@@ -993,6 +1009,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "medium",
     "sizeChart": [
       {
         "us": 6,
@@ -1055,6 +1072,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": 0.5,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 8,
@@ -1111,6 +1129,7 @@
     "fit": "narrow",
     "last": "narrow",
     "fitAdjustment": -1,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 8,
@@ -1149,6 +1168,7 @@
     "fit": "medium",
     "last": "medium",
     "fitAdjustment": 0,
+    "instepTolerance": "low",
     "sizeChart": [
       {
         "us": 6,

@@ -6,6 +6,7 @@ import { scoreModel } from '../matching/scoring'
 import type { ScoreResult } from '../matching/scoring'
 import { loadProfile } from '../matching/profile'
 import type { UserProfile } from '../matching/profile'
+import BreakdownBars from '../ui/BreakdownBars'
 
 const PURPOSE_LABELS: Record<Purpose, string> = {
   casual: 'Повседневные',
@@ -18,6 +19,12 @@ const FIT_LABELS: Record<Fit, string> = {
   narrow: 'Узкая',
   medium: 'Средняя',
   wide: 'Широкая'
+}
+
+const INSTEP_LABELS: Record<'low' | 'medium' | 'high', string> = {
+  low: 'Низкий крой',
+  medium: 'Средний',
+  high: 'Высокий крой'
 }
 
 export default function CatalogDetailPage() {
@@ -85,7 +92,8 @@ export default function CatalogDetailPage() {
             <p className="hint">
               Назначение: {PURPOSE_LABELS[model.purpose]}<br />
               Полнота: {FIT_LABELS[model.fit]}<br />
-              Колодка: {FIT_LABELS[model.last]}
+              Колодка: {FIT_LABELS[model.last]}<br />
+              Подъём: {INSTEP_LABELS[model.instepTolerance ?? 'medium']}
               {model.fitAdjustment !== 0 && (
                 <>
                   <br />
@@ -108,6 +116,14 @@ export default function CatalogDetailPage() {
               <p className="hint" style={{ marginTop: 8 }}>
                 Рекомендуемый размер: US {Number.isInteger(score.recommendedUs) ? score.recommendedUs : score.recommendedUs.toFixed(1)} · EU {score.recommendedEu}
               </p>
+              <BreakdownBars breakdown={score.breakdown} />
+              {score.notes.length > 0 && (
+                <ul className="compat-notes">
+                  {score.notes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
           {!profile && (
