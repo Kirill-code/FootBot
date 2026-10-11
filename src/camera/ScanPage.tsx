@@ -159,6 +159,7 @@ export default function ScanPage() {
   const [cvState, setCvState] = useState<OpenCvLoadState>('idle')
   const engineProgress = useLoadingProgress(phase === 'analyzing' && cvState !== 'ready', cvState === 'ready')
   const [analyzingView, setAnalyzingView] = useState<string>('')
+  const [sockWarn, setSockWarn] = useState(false)
   const [shots, setShots] = useState<Partial<Record<FootView, Shot>>>({})
   const [analysis, setAnalysis] = useState<Partial<Record<FootView, FootMeasurement>>>({})
   const [previews, setPreviews] = useState<Partial<Record<FootView, string>>>({})
@@ -191,26 +192,44 @@ export default function ScanPage() {
   async function analyze() {
     setPhase('analyzing')
     setErrorText('')
+    setSockWarn(false)
     try {
       // 1. Движок (лениво, singleton) — один раз на оба ракурса.
       await loadOpenCv()
       const { measureFoot } = await import('../analysis/measureFoot')
+      // 1б. Модель NN-сегментации (~17 МБ, один раз). Не критична —
+      // при недоступности работает классический анализ.
+      let nnOk = false
+      try {
+        setAnalyzingView('Загружаем модель сегментации (~17 МБ, один раз)…')
+        const { loadPersonSegmenter } = await import('../analysis/personSegment')
+        await loadPersonSegmenter()
+        nnOk = true
+      } catch {
+        /* классика как fallback */
+      }
       const results: Partial<Record<FootView, FootMeasurement>> = {}
       const pv: Partial<Record<FootView, string>> = {}
+      let sock = false
       // 2. Анализ top.
       if (shots.top) {
         setAnalyzingView('Фото 1/2 — стопа сверху…')
-        const m = measureFoot(shots.top.imageData, { view: 'top' })
+        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(shots.top.imageData) : null
+        const m = measureFoot(shots.top.imageData, { view: 'top', personMask })
+        sock = sock || m.sockDetected
         results.top = m
         pv.top = drawPreview(shots.top.canvas, m.footContour)
       }
       // 3. Анализ side.
       if (shots.side) {
         setAnalyzingView('Фото 2/2 — стопа сбоку…')
-        const m = measureFoot(shots.side.imageData, { view: 'side' })
+        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(shots.side.imageData) : null
+        const m = measureFoot(shots.side.imageData, { view: 'side', personMask })
+        sock = sock || m.sockDetected
         results.side = m
         pv.side = drawPreview(shots.side.canvas, m.footContour)
       }
+      setSockWarn(sock)
       setAnalysis(results)
       setPreviews(pv)
       setPhase('results')
@@ -381,9 +400,27 @@ export default function ScanPage() {
           )
         })}
 
+        {(analysis.top?.sockDetected || analysis.side?.sockDetected) && (
+          <div className="card">
+            <p className="hint" style={{ color: '#e8c547' }}>
+              Похоже, на стопе носок — для точного подбора кроссовок снимите носки
+              и переснимите.
+            </p>
+          </div>
+        )}
+
         {errorText && (
           <div className="card">
             <p className="hint" style={{ color: '#ff7a7a' }}>Ошибка движка анализа: {errorText}</p>
+          </div>
+        )}
+
+        {sockWarn && (
+          <div className="card">
+            <p className="hint" style={{ color: '#e8c547' }}>
+              Похоже, на стопе носок — для точного подбора снимите носки и
+              переснимите ракурс сверху.
+            </p>
           </div>
         )}
 

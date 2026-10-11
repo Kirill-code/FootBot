@@ -57,10 +57,21 @@ export interface FootMeasurement {
   footFound: boolean
   /** Тип найденного эталона. */
   referenceKind: ReferenceKind | null
+  /** NN определила, что на стопе носок (класс одежды, нет кожи в нижней части). */
+  sockDetected: boolean
+}
+
+export interface PersonMask {
+  /** Классы пикселей (0 bg, 1 hair, 2 body-skin, 3 face-skin, 4 clothes, 5 acc). */
+  mask: Uint8Array
+  width: number
+  height: number
 }
 
 export interface MeasureOptions {
   view?: FootView
+  /** NN-маска «человек/фон» (MediaPipe selfie multiclass). null/undefined — классика. */
+  personMask?: PersonMask | null
 }
 
 interface ReferenceObject {
@@ -318,6 +329,8 @@ interface FootCandidate {
   /** Кандидат из дырок bright-маски: auxMask = сама bright-маска. */
   isHole?: boolean
   auxMask?: CvMat
+  /** Кандидат из NN-маски «человек/фон» — доверенный источник. */
+  isNN?: boolean
   area: number
   /** Доля точек контура, касающихся границ кадра (0 — не касается). */
   borderTouch: number
@@ -377,6 +390,29 @@ function stripBorders(cv: Cv, mat: CvMat, m: number): void {
   }
 }
 
+/** Ранк для обрезанной части стопы: без extent-проверки (после горизонтального
+ *  среза часть заполняет bbox почти сплошным блоком — это нормально). */
+function rankCutPart(cv: Cv, cnt: CvMat, area: number, touch: number, frameArea: number, frameH: number): number {
+  void frameH
+  // Позиционные проверки (центроид в нижней части кадра) НЕ применяем:
+  // это часть уже принятого кандидата, стопа может быть в любой части кадра.
+  let rank = 0
+  if (area < frameArea * FOOT_MIN_AREA_FRAC || area > frameArea * FOOT_MAX_AREA_FRAC) return rank
+  const m = cv.moments(cnt)
+  if (m.m00 <= 0) return rank
+  const rect = cv.minAreaRect(cnt)
+  const long = Math.max(rect.size.width, rect.size.height)
+  const short = Math.min(rect.size.width, rect.size.height)
+  // Обрезанная часть может быть шире обычной стопы (срез по щиколотке) —
+  // верхнюю границу aspect ослабляем.
+  if (short <= 0 || long / short < FOOT_ASPECT_MIN || long / short > 10) return rank
+  rank += 2
+  if (touch < 0.02) rank += 1
+  else if (touch < 0.15) rank += 0.5
+  rank += Math.min(area / frameArea, 0.2)
+  return rank
+}
+
 /** Доля точек контура в полосе у каждой границы кадра. */
 function borderTouchFraction(cnt: CvMat, w: number, h: number): number {
   let touching = 0
@@ -419,6 +455,8 @@ let currentView: FootView = 'top'
 let frameMeanGray = 0
 /** Grayscale кадра — для оценки яркости кандидатов (side-ракурс). */
 let currentGray: CvMat | null = null
+/** mm/px эталона (null без эталона) — для стратегии полосы в splitFootFromLeg. */
+let currentMmPerPx: number | null = null
 
 /** Комплексная оценка кандидата: форма + касание границ + позиция + размер. */
 function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameArea: number, frameH: number): number {
@@ -457,6 +495,82 @@ function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameAre
 
 /** Возвращает лучшего из двух кандидатов (null-безопасно).
  *  Дырки bright-маски получают бонус: их контур точный (без эрозии). */
+/**
+ * Вертикальный срез голени для top: нога входит сверху/сбоку, стопа тянется
+ * в сторону. Режем по правой границе столба верхней трети bbox — остаётся стопа.
+ */
+function cutLegColumn(
+  cv: Cv,
+  cand: FootCandidate,
+  srcW: number,
+  srcH: number,
+  frameArea: number,
+  t: MatTracker,
+  dbg?: FootDebug
+): FootCandidate | null {
+  const box = cv.boundingRect(cand.contour)
+  if (box.height < 60) return null
+  // Столб голени: пиксели есть в верхней части bbox, но НЕТ в нижней
+  // (щиколотка опирается в стопу — её колонки имеют пиксели снизу).
+  const topY1 = box.y + Math.floor(box.height * 0.4)
+  const botY0 = box.y + Math.floor(box.height * 0.6)
+  let legRight = -1
+  for (let x = box.x; x < box.x + box.width; x++) {
+    let hasTop = false
+    let hasBot = false
+    for (let y = box.y; y <= Math.min(topY1, srcH - 1); y++) {
+      if (cand.mask.ucharPtr(y, x)[0] > 0) {
+        hasTop = true
+        break
+      }
+    }
+    if (hasTop) {
+      for (let y = botY0; y <= Math.min(box.y + box.height, srcH - 1); y++) {
+        if (cand.mask.ucharPtr(y, x)[0] > 0) {
+          hasBot = true
+          break
+        }
+      }
+      if (!hasBot) legRight = x
+    }
+  }
+  if (legRight < 0) return null
+  const cutX = Math.min(box.x + box.width - 10, legRight + Math.round(box.width * 0.05))
+  const rightMask = t.track(cand.mask.clone())
+  for (let y = 0; y < srcH; y++) for (let x = 0; x < cutX; x++) rightMask.ucharPtr(y, x)[0] = 0
+  const rightArea = cv.countNonZero(rightMask)
+  if (rightArea < cand.area * 0.3) return null
+  // Лучший НИЖНИЙ фрагмент по площади (стопа), rankCutPart — только бонус.
+  const fragCands = collectFootCandidates(cv, rightMask, srcW, srcH, frameArea, t, dbg, false, false)
+  let best: FootCandidate | null = null
+  let bestBottom = -1
+  for (const c of fragCands) {
+    if (c.area < frameArea * 0.004) continue
+    const b = cv.boundingRect(c.contour)
+    if (b.y + b.height > bestBottom) {
+      bestBottom = b.y + b.height
+      best = c
+    }
+  }
+  if (!best && sizeGateEnabled) {
+    sizeGateEnabled = false
+    for (const c of collectFootCandidates(cv, rightMask, srcW, srcH, frameArea, t, dbg, false, false)) {
+      if (c.area < frameArea * 0.004) continue
+      const b = cv.boundingRect(c.contour)
+      if (b.y + b.height > bestBottom) {
+        bestBottom = b.y + b.height
+        best = c
+      }
+    }
+    sizeGateEnabled = true
+  }
+  if (best) {
+    best.rank = Math.max(best.rank, rankCutPart(cv, best.contour, best.area, best.borderTouch, frameArea, srcH))
+    dbg?.onInfo?.('leg_column_cut', { cutX, rank: Math.round(best.rank * 100) / 100, areaPct: Math.round((best.area / frameArea) * 1000) / 10 })
+  }
+  return best
+}
+
 function betterCandidate(a: FootCandidate | null, b: FootCandidate | null): FootCandidate | null {
   if (b === null) return a
   if (a === null) return b
@@ -627,6 +741,52 @@ function splitFootFromLeg(cv: Cv, cand: FootCandidate, srcW: number, srcH: numbe
 
   // Сканируем снизу вверх: стопа — широкая часть внизу. Ищем устойчивое
   // сужение (щиколотку) выше неё; режем по нижней границе сужения.
+  if (cand.isNN && currentView === 'top' && currentMmPerPx && currentMmPerPx > 0) {
+    dbg?.onInfo?.('band_entry', { mmPerPx: Math.round(currentMmPerPx * 100) / 100, boxH: box.height })
+    // Стратегия для top: «нога+стопа» по диагонали. Берём горизонтальную
+    // полосу высотой ~длина стопы в px, где масса маски максимальна
+    // (нога узкая, стопа широкая), — это и есть стопа.
+    const bandH = Math.min(box.height, Math.round(265 / currentMmPerPx))
+    if (bandH >= 40 && bandH < box.height) {
+      const rowMass: number[] = []
+      for (let y = box.y; y < box.y + box.height; y++) {
+        let n = 0
+        for (let x = box.x; x < box.x + box.width; x++) {
+          if (cand.mask.ucharPtr(y, x)[0] > 0) n++
+        }
+        rowMass.push(n)
+      }
+      let bestStart = 0
+      let bestSum = -1
+      for (let i = 0; i + bandH <= rowMass.length; i++) {
+        let sum = 0
+        for (let j = i; j < i + bandH; j++) sum += rowMass[j]
+        if (sum > bestSum) {
+          bestSum = sum
+          bestStart = i
+        }
+      }
+      const cut2 = t.track(cand.mask.clone())
+      for (let y = 0; y < box.y + bestStart; y++) for (let x = 0; x < srcW; x++) cut2.ucharPtr(y, x)[0] = 0
+      for (let y = box.y + bestStart + bandH; y < srcH; y++) for (let x = 0; x < srcW; x++) cut2.ucharPtr(y, x)[0] = 0
+      let bandBest: FootCandidate | null = null
+      for (const c of collectFootCandidates(cv, cut2, srcW, srcH, frameArea, t, undefined, false, false)) {
+        if (!bandBest || c.rank > bandBest.rank) bandBest = c
+      }
+      if (!bandBest && sizeGateEnabled) {
+        sizeGateEnabled = false
+        for (const c of collectFootCandidates(cv, cut2, srcW, srcH, frameArea, t, undefined, false, false)) {
+          if (!bandBest || c.rank > bandBest.rank) bandBest = c
+        }
+        sizeGateEnabled = true
+      }
+      if (bandBest) {
+        bandBest.rank = Math.max(bandBest.rank, rankCutPart(cv, bandBest.contour, bandBest.area, bandBest.borderTouch, frameArea, srcH))
+        dbg?.onInfo?.('band_cut', { startRow: box.y + bestStart, bandH, rank: bandBest.rank })
+        return bandBest
+      }
+    }
+  }
   let narrowRun = 0
   let cutIdx = -1
   for (let i = widths.length - 1; i >= Math.floor(widths.length * 0.25); i--) {
@@ -658,7 +818,8 @@ function splitFootFromLeg(cv: Cv, cand: FootCandidate, srcW: number, srcH: numbe
   }
   if (cutIdx < 0) return null // сужения нет — это и есть стопа
   // Срез, оставляющий меньше четверти высоты, — артефакт, а не щиколотка.
-  if (cutIdx > widths.length * 0.75) return null
+  const maxCutFrac = currentView === "side" ? 0.85 : 0.75
+  if (cutIdx > widths.length * maxCutFrac) return null
   dbg?.onInfo?.('leg_split_cut', { cutRow: box.y + cutIdx, footW: Math.round(footW), widthAtCut: Math.round(widths[cutIdx]) })
 
   // Обрезаем маску выше шеи.
@@ -667,11 +828,21 @@ function splitFootFromLeg(cv: Cv, cand: FootCandidate, srcW: number, srcH: numbe
   for (let y = 0; y < cutRow; y++) for (let x = 0; x < srcW; x++) cut.ucharPtr(y, x)[0] = 0
 
   // Крупнейшая компоненте ниже среза — стопа.
-  const cands = collectFootCandidates(cv, cut, srcW, srcH, frameArea, t, undefined, false)
   let best: FootCandidate | null = null
-  for (const c of cands) {
+  for (const c of collectFootCandidates(cv, cut, srcW, srcH, frameArea, t, undefined, false, false)) {
     if (!best || c.rank > best.rank) best = c
   }
+  if (!best && sizeGateEnabled) {
+    sizeGateEnabled = false
+    for (const c of collectFootCandidates(cv, cut, srcW, srcH, frameArea, t, undefined, false, false)) {
+      if (!best || c.rank > best.rank) best = c
+    }
+    sizeGateEnabled = true
+  }
+  if (best) {
+    best.rank = Math.max(best.rank, rankCutPart(cv, best.contour, best.area, best.borderTouch, frameArea, srcH))
+  }
+  dbg?.onInfo?.('leg_split_result', { rank: best?.rank ?? null, areaPct: best ? Math.round((best.area / frameArea) * 1000) / 10 : null })
   return best
 }
 
@@ -712,9 +883,12 @@ function splitSideAttachment(
   if (defects.rows === 0) return null
   const box = cv.boundingRect(cnt)
 
-  // Глубочайшая впадина у боковой кромки, на средней высоте bbox.
+  // Две стратегии: вертикальный срез по боковой впадине (тапок рядом) и
+  // горизонтальный по верхней впадине (нога, идущая в стопу по диагонали).
   let bestCutX = -1
   let bestDepth = 50 // минимальная глубина, px
+  let bestCutY = -1
+  let bestDepthY = 30
   for (let i = 0; i < defects.rows; i++) {
     const d = defects.intPtr(i, 0) as ArrayLike<number>
     const s = d[0]
@@ -733,25 +907,63 @@ function splitSideAttachment(
       bestDepth = depth
       bestCutX = pf[0]
     }
+    // Верхняя впадина — прирост ноги (только top-ракурс).
+    if (currentView === 'top' && yRel < 0.5 && depth > bestDepthY) {
+      bestDepthY = depth
+      bestCutY = pf[1]
+    }
   }
-  if (bestCutX < 0) return null
-  dbg?.onInfo?.('side_split', { cutX: bestCutX, depth: Math.round(bestDepth) })
 
-  // Определяем меньшую половину по площади маски.
-  const leftMask = t.track(cand.mask.clone())
-  for (let y = 0; y < srcH; y++) for (let x = bestCutX; x < srcW; x++) leftMask.ucharPtr(y, x)[0] = 0
-  const rightMask = t.track(cand.mask.clone())
-  for (let y = 0; y < srcH; y++) for (let x = 0; x < bestCutX; x++) rightMask.ucharPtr(y, x)[0] = 0
-  const leftArea = cv.countNonZero(leftMask)
-  const rightArea = cv.countNonZero(rightMask)
-  const keep = leftArea >= rightArea ? leftMask : rightMask
-
-  const cands = collectFootCandidates(cv, keep, srcW, srcH, frameArea, t, dbg, false)
-  let best: FootCandidate | null = null
-  for (const c of cands) {
-    if (!best || c.rank > best.rank) best = c
+  const collectBest = (keep: CvMat): FootCandidate | null => {
+    let b: FootCandidate | null = null
+    for (const c of collectFootCandidates(cv, keep, srcW, srcH, frameArea, t, dbg, false)) {
+      if (!b || c.rank > b.rank) b = c
+    }
+    if (!b && sizeGateEnabled) {
+      sizeGateEnabled = false
+      for (const c of collectFootCandidates(cv, keep, srcW, srcH, frameArea, t, dbg, false)) {
+        if (!b || c.rank > b.rank) b = c
+      }
+      sizeGateEnabled = true
+    }
+    if (b) {
+      b.rank = Math.max(b.rank, rankCutPart(cv, b.contour, b.area, b.borderTouch, frameArea, srcH))
+    }
+    return b
   }
-  return best
+
+  let result: FootCandidate | null = null
+  if (bestCutX >= 0) {
+    dbg?.onInfo?.('side_split', { cutX: bestCutX, depth: Math.round(bestDepth) })
+    const leftMask = t.track(cand.mask.clone())
+    for (let y = 0; y < srcH; y++) for (let x = bestCutX; x < srcW; x++) leftMask.ucharPtr(y, x)[0] = 0
+    const rightMask = t.track(cand.mask.clone())
+    for (let y = 0; y < srcH; y++) for (let x = 0; x < bestCutX; x++) rightMask.ucharPtr(y, x)[0] = 0
+    const leftArea = cv.countNonZero(leftMask)
+    const rightArea = cv.countNonZero(rightMask)
+    const keep = leftArea >= rightArea ? leftMask : rightMask
+    result = collectBest(keep)
+  }
+  if (bestCutY >= 0) {
+    dbg?.onInfo?.('top_split', { cutY: bestCutY, depth: Math.round(bestDepthY) })
+    const lowMask = t.track(cand.mask.clone())
+    for (let y = 0; y < bestCutY; y++) for (let x = 0; x < srcW; x++) lowMask.ucharPtr(y, x)[0] = 0
+    const hiMask = t.track(cand.mask.clone())
+    for (let y = bestCutY; y < srcH; y++) for (let x = 0; x < srcW; x++) hiMask.ucharPtr(y, x)[0] = 0
+    const lowArea = cv.countNonZero(lowMask)
+    const hiArea = cv.countNonZero(hiMask)
+    const keep = lowArea >= hiArea ? lowMask : hiMask
+    const r2 = collectBest(keep)
+    // Защита от ложных срезов: оставшаяся часть должна быть стопоподобной
+    // по aspect и заметно меньше исходника.
+    if (r2) {
+      const rb = cv.boundingRect(r2.contour)
+      const rAspect = Math.max(rb.width, rb.height) / Math.max(1, Math.min(rb.width, rb.height))
+      const removed = cand.area > 0 && r2.area <= cand.area * 0.85
+      if (rAspect >= 1.8 && removed && (!result || r2.rank > result.rank)) result = r2
+    }
+  }
+  return result
 }
 
 /**
@@ -932,6 +1144,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     // --- Эталон калибровки ---
     const reference = findReference(cv, edges, blurred, frameArea, t, debug)
     activeRefBounds = reference ? quadBounds(reference.quad) : null
+    currentMmPerPx = reference ? reference.mmPerPx : null
     // Ожидаемая площадь стопы (~265×115 мм, заполнение ~0.65) для ранжирования.
     expectedFootAreaPx = reference ? Math.round((0.65 * 265 * 115) / (reference.mmPerPx * reference.mmPerPx)) : null
 
@@ -960,6 +1173,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     const morphHoles = t.track(new cv.Mat())
 
     let foot: FootCandidate | null = null
+    let nnCandidate: FootCandidate | null = null
     const consider = (binary: CvMat, label: string): FootCandidate | null => {
       // Мягкий open (3×3) не разрушает текстуру носка, close лечит разрывы.
       // ВАЖНО: in-place morphologyEx/erode в opencv-js — частичный no-op,
@@ -1053,15 +1267,17 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       foot = betterCandidate(foot, considerHoles(threshBright))
     }
 
-    for (const inv of [false, true]) {
-      const flag = (inv ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY) + cv.THRESH_OTSU
-      cv.threshold(blurredBig, thresh, 0, 255, flag)
-      foot = betterCandidate(foot, consider(thresh, inv ? '3_binary_dark' : '2_binary_bright'))
+    if (!foot || foot.rank < 1.5) {
+      for (const inv of [false, true]) {
+        const flag = (inv ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY) + cv.THRESH_OTSU
+        cv.threshold(blurredBig, thresh, 0, 255, flag)
+        foot = betterCandidate(foot, consider(thresh, inv ? '3_binary_dark' : '2_binary_bright'))
+      }
     }
     // Третий источник: kmeans-разделение яркости (тёмный класс),
     // минус «тёплые» пиксели (паркет, доски, кожа) — иначе тёмный пол
     // слипается с носком и раздувает контур.
-    const km = kmeansDarkMask(cv, blurredBig, t)
+    const km = foot && foot.rank >= 1.5 ? null : kmeansDarkMask(cv, blurredBig, t)
     if (km) {
       const warm = t.track(new cv.Mat())
       const lower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 40, 0, 0])
@@ -1079,7 +1295,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     // Пятый источник: тёмный холодный насыщенный (носок navy).
     // Джинсы исключены по V (яркие), безель/UI по S (не насыщенные).
     // Крупный close срастает полосы жаккарда в единый блоб.
-    {
+    if (!foot || foot.rank < 1.5) {
       const coolDark = t.track(new cv.Mat())
       const lo = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [80, 35, 0, 0])
       const hi = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [150, 255, 158, 0])
@@ -1104,49 +1320,132 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       foot = betterCandidate(foot, consider(morph2, '3c_cooldark'))
     }
 
-    // Шестой источник: кольца Canny-эджей (БЕЗ эрозии — кольцо тонкое).
-    // Босая стопа на солнечном паркете яркостно не отделяется (сливается с
-    // полом в гигантский блоб), но контур стопы — замкнутое кольцо эджей.
-    {
-      const edgeK = t.track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15)))
-      const edgeClosed = t.track(new cv.Mat())
-      cv.morphologyEx(edges, edgeClosed, cv.MORPH_CLOSE, edgeK)
-      stripBorders(cv, edgeClosed, borderStrip)
-      debug?.onMask('4_edge_rings', edgeClosed)
-      let edgeBest: FootCandidate | null = null
-      let edgeCount = 0
-      // checkRef=false: тонкое кольцо стопы может лежать прямо над листом —
-      // точки контура попадают в его прямоугольник. Кольцо самого листа —
-      // прямоугольник, ранкинг (extent) его отсекает.
-      for (const cand of collectFootCandidates(cv, edgeClosed, src.cols, src.rows, frameArea, t, debug, true, false)) {
-        cand.fullMask = edgeClosed
-        edgeCount++
-        edgeBest = betterCandidate(edgeBest, cand)
-      }
-      if (!edgeBest && sizeGateEnabled) {
-        // Fallback без размерного gate и без ref-exclusion (см. выше).
-        sizeGateEnabled = false
+    if (!foot || foot.rank < 1.5) {
+      // Шестой источник: кольца Canny-эджей (БЕЗ эрозии — кольцо тонкое).
+      // Босая стопа на солнечном паркете яркостно не отделяется (сливается с
+      // полом в гигантский блоб), но контур стопы — замкнутое кольцо эджей.
+      {
+        const edgeK = t.track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15)))
+        const edgeClosed = t.track(new cv.Mat())
+        cv.morphologyEx(edges, edgeClosed, cv.MORPH_CLOSE, edgeK)
+        stripBorders(cv, edgeClosed, borderStrip)
+        debug?.onMask('4_edge_rings', edgeClosed)
+        let edgeBest: FootCandidate | null = null
+        let edgeCount = 0
+        // checkRef=false: тонкое кольцо стопы может лежать прямо над листом —
+        // точки контура попадают в его прямоугольник. Кольцо самого листа —
+        // прямоугольник, ранкинг (extent) его отсекает.
         for (const cand of collectFootCandidates(cv, edgeClosed, src.cols, src.rows, frameArea, t, debug, true, false)) {
           cand.fullMask = edgeClosed
           edgeCount++
           edgeBest = betterCandidate(edgeBest, cand)
         }
+        if (!edgeBest && sizeGateEnabled) {
+          // Fallback без размерного gate и без ref-exclusion (см. выше).
+          sizeGateEnabled = false
+          for (const cand of collectFootCandidates(cv, edgeClosed, src.cols, src.rows, frameArea, t, debug, true, false)) {
+            cand.fullMask = edgeClosed
+            edgeCount++
+            edgeBest = betterCandidate(edgeBest, cand)
+          }
+          sizeGateEnabled = true
+        }
+        debug?.onInfo?.('consider', { label: '4_edge_rings', candidates: edgeCount, bestRank: edgeBest?.rank ?? null })
+        // Кольца — fallback-only: на скриншотах находят кольца UI-элементов и
+        // обыгрывают реальную стопу. Используем, только если нормальные маски
+        // никого не дали.
+        if (edgeBest) {
+          foot = betterCandidate(foot, edgeBest)
+          debug?.onInfo?.('edge_fallback', { rank: edgeBest.rank, areaPct: Math.round((edgeBest.area / frameArea) * 1000) / 10 })
+        }
+      }
+
+    }
+
+    // === Источник 0: NN-маска «человек/фон» (основной) ===
+    // person = 2|3|4. Если дала адекватного кандидата — классические пороговые
+    // проходы не запускаем (быстрее и стабильнее).
+    const personMaskOpt = options?.personMask
+    if (personMaskOpt && personMaskOpt.mask.length >= personMaskOpt.width * personMaskOpt.height) {
+      const pmW = personMaskOpt.width
+      const pmH = personMaskOpt.height
+      // person = 2|3|4. Собираем в JS-массив и одним matFromArray — запись
+      // через миллион ucharPtr портит соседнюю wasm-память (см. баг с in-place).
+      const personArr = new Uint8Array(pmW * pmH)
+      for (let i = 0; i < pmW * pmH; i++) {
+        const v = personMaskOpt.mask[i]
+        if (v === 2 || v === 3 || v === 4) personArr[i] = 255
+      }
+      const person = t.track(cv.matFromArray(pmH, pmW, cv.CV_8UC1, Array.from(personArr)))
+      // Масштаб до размеров кадра (nearest), если отличается.
+      let personFull: CvMat = person
+      if (pmW !== src.cols || pmH !== src.rows) {
+        const scaled = t.track(new cv.Mat())
+        cv.resize(person, scaled, { width: src.cols, height: src.rows }, 0, 0, cv.INTER_NEAREST)
+        personFull = scaled
+      }
+      // Морфология в отдельные dst и отдельные mats (in-place — no-op в opencv.js;
+      // общие morph/morph2 не трогаем, чтобы не влиять на классические проходы).
+      const nnMorphA = t.track(new cv.Mat())
+      const nnMorphB = t.track(new cv.Mat())
+      cv.morphologyEx(personFull, nnMorphA, cv.MORPH_OPEN, kernelSmall)
+      cv.morphologyEx(nnMorphA, nnMorphB, cv.MORPH_CLOSE, kernel)
+      stripBorders(cv, nnMorphB, borderStrip)
+      debug?.onMask('0_person_nn', nnMorphB)
+      let nnBest: FootCandidate | null = null
+      const nnCands = collectFootCandidates(cv, nnMorphB, src.cols, src.rows, frameArea, t, debug)
+      if (!nnCands.length && sizeGateEnabled) {
+        sizeGateEnabled = false
+        for (const c of collectFootCandidates(cv, nnMorphB, src.cols, src.rows, frameArea, t, debug)) nnCands.push(c)
         sizeGateEnabled = true
       }
-      debug?.onInfo?.('consider', { label: '4_edge_rings', candidates: edgeCount, bestRank: edgeBest?.rank ?? null })
-      // Кольца — fallback-only: на скриншотах находят кольца UI-элементов и
-      // обыгрывают реальную стопу. Используем, только если нормальные маски
-      // никого не дали.
-      if ((!foot || foot.rank < 1.5) && edgeBest) {
-        foot = betterCandidate(foot, edgeBest)
-        debug?.onInfo?.('edge_fallback', { rank: edgeBest.rank, areaPct: Math.round((edgeBest.area / frameArea) * 1000) / 10 })
+      // Стопа — крупнейшая компонента у нижнего конца маски (bottom в пределах
+      // 15% от самого нижнего пикселя силуэта).
+      let nnBottomY = -1
+      for (const c of nnCands) {
+        c.fullMask = nnMorphB
+        if (c.area < frameArea * 0.005) continue
+        const b = cv.boundingRect(c.contour)
+        if (b.y + b.height > nnBottomY) nnBottomY = b.y + b.height
+      }
+      for (const c of nnCands) {
+        if (c.area < frameArea * 0.005) continue
+        const b = cv.boundingRect(c.contour)
+        if (b.y + b.height < nnBottomY - src.rows * 0.15) continue
+        if (!nnBest || c.area > nnBest.area) nnBest = c
+      }
+      if (nnBest) {
+        // Размерный gate заточен под классику; силуэт «нога+стопа» от NN
+        // может быть крупнее ожидания.
+        sizeGateEnabled = false
+      }
+      // NN доверенная: принимаем по площади (классические shape-эвристики
+      // типа extent ломаются на сплошном силуэте «нога+стопа»).
+      if (nnBest && nnBest.area > frameArea * 0.005 && nnBest.area < frameArea * 0.6) {
+        nnBest.rank = Math.max(nnBest.rank, 3) + 1.5
+        nnBest.isNN = true
+        nnCandidate = nnBest
+        debug?.onInfo?.('nn_chosen', { rank: Math.round(nnBest.rank * 100) / 100, areaPct: Math.round((nnBest.area / frameArea) * 1000) / 10 })
       }
     }
 
-    // Отрезаем боковые приросты (предметы рядом с пяткой/носком).
+    // Отрезаем боковые приросты (предметы рядом с пяткой/носком) и ногу
+    // сверху (диагональный вход голени в top-ракурсе).
     if (foot) {
       const splitC = splitSideAttachment(cv, foot, src.cols, src.rows, frameArea, t, debug)
       if (splitC && splitC.rank >= foot.rank) foot = splitC
+    }
+    // Вертикальный срез столба ноги (NN-силуэт «нога+стопа» в top).
+    if (foot && currentView === 'top') {
+      const fb = cv.boundingRect(foot.contour)
+      const fAspect = Math.max(fb.width, fb.height) / Math.max(1, Math.min(fb.width, fb.height))
+      debug?.onInfo?.('colcut_entry', { fAspect: Math.round(fAspect * 100) / 100 })
+      if (fAspect < 2.6) {
+        const colCut = cutLegColumn(cv, foot, src.cols, src.rows, frameArea, t, debug)
+        // NN-силуэт доверенный: срез голени принимаем даже при низком rank
+        // (позиционные эвристики ломаются на стопе в верхней части кадра).
+        if (colCut && (colCut.rank >= foot.rank || (foot.isNN && colCut.area > frameArea * 0.03))) foot = colCut
+      }
     }
 
     // Изолированная маленькая стопа на светлом фоне (носок, контур строго
@@ -1200,8 +1499,54 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       footContour: [],
       referenceFound: reference !== null,
       footFound: foot !== null && foot.rank >= 1.5,
-      referenceKind: reference?.kind ?? null
+      referenceKind: reference?.kind ?? null,
+      sockDetected: false
     }
+
+    // Носок: NN-маска покрывает ногу классом «одежда», а кожи в нижней части нет.
+    const pm = options?.personMask
+    if (pm && pm.mask.length >= pm.width * pm.height) {
+      const third = Math.floor(pm.height / 3)
+      let skin = 0
+      let clothes = 0
+      for (let y = pm.height - third; y < pm.height; y++) {
+        for (let x = 0; x < pm.width; x++) {
+          const v = pm.mask[y * pm.width + x]
+          if (v === 2 || v === 3) skin++
+          else if (v === 4) clothes++
+        }
+      }
+      if (skin === 0 && clothes > 200) empty.sockDetected = true
+    }
+
+    // Арбитраж NN vs классика: NN — основной источник, но при большом
+    // расхождении длин (и правдоподобной классике) доверяем проверенной
+    // классике — NN-силуэт почти всегда включает голень.
+    if (nnCandidate && foot && nnCandidate !== foot && reference) {
+      const hullMax = (cand: FootCandidate): number => {
+        const h = t.track(new cv.Mat())
+        cv.convexHull(cand.contour, h, false, true)
+        const pts = contourPoints(h)
+        let m = 0
+        for (let i = 0; i < pts.length; i++)
+          for (let j = i + 1; j < pts.length; j++) m = Math.max(m, dist(pts[i].x, pts[i].y, pts[j].x, pts[j].y))
+        return m
+      }
+      const nnMm = hullMax(nnCandidate) * reference.mmPerPx
+      const clMm = hullMax(foot) * reference.mmPerPx
+      const plausible = (v: number) => v >= 200 && v <= 340
+      // Расхождение: включённая в силуэт голень только РАЗДУВАЕТ длину —
+      // чистый контур стопы короче. Берём более короткого (если оба правдоподобны).
+      const bothPlausible = plausible(clMm) && plausible(nnMm)
+      if ((plausible(clMm) && !plausible(nnMm)) || (bothPlausible && Math.abs(nnMm - clMm) / Math.max(nnMm, clMm) > 0.12 && nnMm > clMm)) {
+        debug?.onInfo?.('arbitration', { nnMm: Math.round(nnMm), clMm: Math.round(clMm), picked: 'classic' })
+        // foot уже классика — оставляем
+      } else {
+        debug?.onInfo?.('arbitration', { nnMm: Math.round(nnMm), clMm: Math.round(clMm), picked: 'nn' })
+        foot = nnCandidate
+      }
+    }
+
     if (!foot || !empty.footFound) return empty
 
     // Контур стопы (упрощённый hull). Вершины у левого/правого края кадра
@@ -1221,10 +1566,25 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
 
     // --- Общая метрика: длина (max pairwise по hull), кросс-проверка ракурсов ---
     let lengthPx = 0
+    const pairs: Array<{ d: number; i: number; j: number }> = []
     for (let i = 0; i < hullPts.length; i++) {
       for (let j = i + 1; j < hullPts.length; j++) {
         const d = dist(hullPts[i].x, hullPts[i].y, hullPts[j].x, hullPts[j].y)
+        pairs.push({ d, i, j })
         if (d > lengthPx) lengthPx = d
+      }
+    }
+    // NN/силуэт «нога+стопа»: диагональ с голенью превышает реальную длину.
+    // Берём самую длинную хорду в пределах правдоподобного бюджета (~300 мм).
+    if (view === 'top' && currentMmPerPx && currentMmPerPx > 0) {
+      const budgetPx = 300 / currentMmPerPx
+      if (lengthPx > budgetPx) {
+        pairs.sort((a, b) => b.d - a.d)
+        const pick = pairs.find((p) => p.d <= budgetPx * 0.98)
+        if (pick) {
+          debug?.onInfo?.('chord_budget', { full: Math.round(lengthPx), picked: Math.round(pick.d) })
+          lengthPx = pick.d
+        }
       }
     }
 

@@ -1,8 +1,11 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  test: {
+    exclude: ['node_modules/**', 'dist/**', 'tools/**']
+  },
   base: './',
   plugins: [
     react(),
@@ -25,8 +28,32 @@ export default defineConfig({
       workbox: {
         // OpenCV (~15 МБ) не прекешируем: грузится лениво при первом скане
         // и кешируется runtime-стратегией ниже.
-        globIgnores: ['**/opencv-*.js'],
+        globIgnores: ['**/opencv-*.js', '**/mediapipe/**'],
         runtimeCaching: [
+          {
+            // mediapipe wasm — self-hosted в public/, крупные файлы
+            urlPattern: /\/mediapipe\/.*\.(?:js|wasm)$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'mediapipe-wasm',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 * 24 * 30
+              }
+            }
+          },
+          {
+            // Модель NN-сегментации — с CDN Google, 17 МБ, редко меняется
+            urlPattern: /https:\/\/storage\.googleapis\.com\/mediapipe-models\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'nn-model',
+              expiration: {
+                maxEntries: 4,
+                maxAgeSeconds: 60 * 60 * 24 * 30
+              }
+            }
+          },
           {
             // OpenCV.js — тяжёлый ленивый чанк, хеш в имени меняется от сборки к сборке
             urlPattern: /\/assets\/opencv-[^/]+\.js$/,
