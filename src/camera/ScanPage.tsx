@@ -4,17 +4,17 @@ import { loadOpenCv, subscribeOpenCvState, type OpenCvLoadState } from '../analy
 import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
 
-// Мастер сканирования: 3 ракурса (сверху / сбоку / спереди 45°) → модель стопы.
+// Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку), ПОТОМ анализ.
+// Третий ракурс (45°) убран: модель стопы строится по длине/ширине/подъёму.
 // OpenCV и модуль анализа грузятся динамически — в main-бандл не попадают.
 
 type Phase =
-  | 'idle' // шаг ожидает фото
-  | 'loading-opencv' // загрузка wasm (~16 МБ)
-  | 'analyzing' // анализ фото
-  | 'no-reference' // стопа есть, эталона нет
-  | 'no-foot' // стопа не найдена
-  | 'engine-error'
-  | 'done' // ракурс принят
+  | 'collect' // сбор фото (шаг 1/2 или 2/2)
+  | 'analyzing' // единый экран анализа
+  | 'results' // результаты по ракурсам
+  | 'saved' // модель сохранена
+
+type StepState = 'idle' | 'preview' // внутри collect
 
 const MAX_DIM_PX = 1600
 const MAX_BLOB_BYTES = 1024 * 1024 // 1 МБ
@@ -22,7 +22,7 @@ const MAX_BLOB_BYTES = 1024 * 1024 // 1 МБ
 interface StepInfo {
   view: FootView
   title: string
-  hint: string
+  why: string
   noReferenceHint: string
   noFootHint: string
 }
@@ -30,30 +30,43 @@ interface StepInfo {
 const STEPS: StepInfo[] = [
   {
     view: 'top',
-    title: 'Фото 1/3 — стопа сверху',
-    hint: 'Снимите стопу строго сверху. Рядом на полу положите лист А4 (или А5, или банковскую карту) — целиком в кадр.',
-    noReferenceHint: 'Стопа найдена, но эталон масштаба не распознан. Положите рядом со стопой лист А4 или банковскую карту (целиком в кадр) и переснимите.',
+    title: 'Фото 1/2 — стопа сверху',
+    why: 'Сверху измеряем длину и ширину стопы.',
+    noReferenceHint: 'Стопа найдена, но эталон масштаба не распознан. Положите рядом со стопой лист А4 или банковскую карту (целиком в кадр, рядом со стопой) и переснимите.',
     noFootHint: 'Стопа не найдена. Снимите строго сверху, вся стопа в кадре, на контрастном полу.'
   },
   {
     view: 'side',
-    title: 'Фото 2/3 — стопа сбоку',
-    hint: 'Снимите стопу сбоку: стопа стоит на полу, лист А4 или карта лежат на полу рядом (на той же линии пола).',
-    noReferenceHint: 'Стопа найдена, но эталон не распознан. Положите лист А4 или карту на пол рядом со стопой и переснимите.',
+    title: 'Фото 2/2 — стопа сбоку',
+    why: 'Сбоку измеряем высоту подъёма — она влияет на выбор модели кроссовок.',
+    noReferenceHint: 'Стопа найдена, но эталон не распознан. Положите лист А4 или карту на пол рядом со стопой (на той же линии пола) и переснимите.',
     noFootHint: 'Стопа не найдена. Снимите сбоку, чтобы стопа целиком была в кадре и не сливалась с фоном.'
-  },
-  {
-    view: 'front',
-    title: 'Фото 3/3 — стопа спереди под 45°',
-    hint: 'Снимите стопу спереди под углом ~45° (пальцы ближе к камере). Лист А4 или карта на полу рядом.',
-    noReferenceHint: 'Стопа найдена, но эталон не распознан. Положите лист А4 или карту рядом со стопой и переснимите.',
-    noFootHint: 'Стопа не найдена. Снимите спереди под 45°, вся стопа в кадре, на контрастном полу.'
   }
 ]
 
-/** Читает файл в ImageData + canvas, уменьшая до maxDim px. */
+interface Shot {
+  blob: Blob
+  previewUrl: string
+  imageData: ImageData
+  canvas: HTMLCanvasElement
+}
+
+/**
+ * Читает файл в ImageData + canvas, уменьшая до maxDim px.
+ * EXIF-ориентация: телефонные фото почти всегда повёрнуты тегом 274.
+ * createImageBitmap(blob, {imageOrientation:'from-image'}) поворачивает
+ * пиксели по EXIF (Chrome/FF; при ошибке — откат на обычный bitmap,
+ * тогда ориентацию применит декодер <img> при отрисовке на canvas).
+ */
 async function fileToImageData(file: Blob, maxDim: number): Promise<{ imageData: ImageData; canvas: HTMLCanvasElement }> {
-  const bmp = await createImageBitmap(file)
+  const scaleBitmap = async (): Promise<ImageBitmap> => {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' })
+    } catch {
+      return createImageBitmap(file)
+    }
+  }
+  const bmp = await scaleBitmap()
   const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height))
   const w = Math.max(1, Math.round(bmp.width * scale))
   const h = Math.max(1, Math.round(bmp.height * scale))
@@ -67,17 +80,13 @@ async function fileToImageData(file: Blob, maxDim: number): Promise<{ imageData:
 }
 
 /** Превью с наложенным контуром стопы. */
-function PreviewImage({ url }: { url: string }) {
-  return <img src={url} alt="Стопа с контуром" style={{ width: '100%', borderRadius: 10, display: 'block' }} />
-}
-
-function drawPreview(canvas: HTMLCanvasElement, contour: FootContourPoint[]): string {
+function drawPreview(canvas: HTMLCanvasElement, contour?: FootContourPoint[]): string {
   const preview = document.createElement('canvas')
   preview.width = canvas.width
   preview.height = canvas.height
   const ctx = preview.getContext('2d')!
   ctx.drawImage(canvas, 0, 0)
-  if (contour.length >= 3) {
+  if (contour && contour.length >= 3) {
     ctx.strokeStyle = '#3ddc84'
     ctx.lineWidth = Math.max(3, canvas.width / 250)
     ctx.beginPath()
@@ -128,212 +137,271 @@ function useLoadingProgress(active: boolean, done: boolean): number {
   return progress
 }
 
-/** Есть ли по ракурсу хоть одна метрика с эталоном. */
+/** Есть ли по ракурсу целевая метрика. */
 function viewMeasured(m: FootMeasurement | undefined, view: FootView): boolean {
   if (!m) return false
-  if (view === 'top') return m.lengthMm !== null && m.widthMm !== null
-  if (view === 'side') return m.instepHeightMm !== null
-  return m.ballWidthMm !== null
+  return view === 'top' ? m.lengthMm !== null && m.widthMm !== null : m.instepHeightMm !== null
+}
+
+/** Человекочитаемая причина неудачи ракурса. */
+function failureHint(m: FootMeasurement | undefined, step: StepInfo): string | null {
+  if (!m || !m.footFound) return step.noFootHint
+  if (!viewMeasured(m, step.view)) return step.noReferenceHint
+  return null
 }
 
 export default function ScanPage() {
   const inputRef = useRef<HTMLInputElement>(null)
   const [foot, setFoot] = useState<FootSide>('left')
   const [step, setStep] = useState(0)
-  const [phase, setPhase] = useState<Phase>('idle')
+  const [phase, setPhase] = useState<Phase>('collect')
+  const [stepState, setStepState] = useState<StepState>('idle')
   const [cvState, setCvState] = useState<OpenCvLoadState>('idle')
-  const progress = useLoadingProgress(phase === 'loading-opencv', cvState === 'ready')
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const engineProgress = useLoadingProgress(phase === 'analyzing' && cvState !== 'ready', cvState === 'ready')
+  const [analyzingView, setAnalyzingView] = useState<string>('')
+  const [shots, setShots] = useState<Partial<Record<FootView, Shot>>>({})
+  const [analysis, setAnalysis] = useState<Partial<Record<FootView, FootMeasurement>>>({})
+  const [previews, setPreviews] = useState<Partial<Record<FootView, string>>>({})
   const [errorText, setErrorText] = useState('')
-  const [measures, setMeasures] = useState<Partial<Record<FootView, FootMeasurement>>>({})
   const [model, setModel] = useState<FootModel | null>(null)
-  const [finished, setFinished] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
-  const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '', ballWidthMm: '' })
+  const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
 
   useEffect(() => subscribeOpenCvState(setCvState), [])
 
   const stepInfo = STEPS[step]
-  const busy = phase === 'loading-opencv' || phase === 'analyzing'
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-
-    setPhase('loading-opencv')
-    setPreviewUrl(null)
     setErrorText('')
     try {
-      await loadOpenCv()
       const { imageData, canvas } = await fileToImageData(file, MAX_DIM_PX)
-
-      setPhase('analyzing')
-      const { measureFoot } = await import('../analysis/measureFoot')
-      const m = measureFoot(imageData, { view: stepInfo.view })
-
-      if (m.footFound && m.footContour.length >= 3) {
-        setPreviewUrl(drawPreview(canvas, m.footContour))
-      }
-
-      if (!m.footFound) {
-        setPhase('no-foot')
-        return
-      }
-      if (!viewMeasured(m, stepInfo.view)) {
-        setPhase('no-reference')
-        return
-      }
-
-      // Ракурс принят: сохраняем фото (+ замер для top) и идём дальше.
       const blob = await canvasToBlob(canvas)
-      await db.photos.add({
-        foot,
-        createdAt: Date.now(),
-        blob,
-        footLengthMm: m.lengthMm,
-        footWidthMm: m.widthMm
-      })
-      if (stepInfo.view === 'top' && m.lengthMm !== null) {
+      const previewUrl = drawPreview(canvas)
+      setShots((prev) => ({ ...prev, [stepInfo.view]: { blob, previewUrl, imageData, canvas } }))
+      setStepState('preview')
+    } catch (err) {
+      setErrorText(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function analyze() {
+    setPhase('analyzing')
+    setErrorText('')
+    try {
+      // 1. Движок (лениво, singleton) — один раз на оба ракурса.
+      await loadOpenCv()
+      const { measureFoot } = await import('../analysis/measureFoot')
+      const results: Partial<Record<FootView, FootMeasurement>> = {}
+      const pv: Partial<Record<FootView, string>> = {}
+      // 2. Анализ top.
+      if (shots.top) {
+        setAnalyzingView('Фото 1/2 — стопа сверху…')
+        const m = measureFoot(shots.top.imageData, { view: 'top' })
+        results.top = m
+        pv.top = drawPreview(shots.top.canvas, m.footContour)
+      }
+      // 3. Анализ side.
+      if (shots.side) {
+        setAnalyzingView('Фото 2/2 — стопа сбоку…')
+        const m = measureFoot(shots.side.imageData, { view: 'side' })
+        results.side = m
+        pv.side = drawPreview(shots.side.canvas, m.footContour)
+      }
+      setAnalysis(results)
+      setPreviews(pv)
+      setPhase('results')
+    } catch (err) {
+      setErrorText(err instanceof Error ? err.message : String(err))
+      setPhase('collect')
+    }
+  }
+
+  function retake(view: FootView) {
+    const idx = STEPS.findIndex((s) => s.view === view)
+    setStep(idx)
+    setShots((prev) => {
+      const next = { ...prev }
+      delete next[view]
+      return next
+    })
+    setStepState('idle')
+    setPhase('collect')
+  }
+
+  async function saveModel() {
+    const m = buildFootModel(analysis)
+    setModel(m)
+    await db.transaction('rw', db.photos, db.measurements, db.footModels, async () => {
+      if (shots.top) {
+        await db.photos.add({ foot, createdAt: Date.now(), blob: shots.top.blob, footLengthMm: m.lengthMm, footWidthMm: m.widthMm })
+      }
+      if (shots.side) {
+        await db.photos.add({ foot, createdAt: Date.now(), blob: shots.side.blob, footLengthMm: m.lengthMm, footWidthMm: null })
+      }
+      if (m.lengthMm !== null) {
         await db.measurements.add({
           createdAt: Date.now(),
           footLengthMm: m.lengthMm,
           footWidthMm: m.widthMm ?? m.lengthMm * 0.4,
           source: 'opencv',
-          contour: m.footContour
+          contour: analysis.top?.footContour
         })
       }
-      setMeasures((prev) => ({ ...prev, [stepInfo.view]: m }))
-      setPhase('done')
-    } catch (err) {
-      setErrorText(err instanceof Error ? err.message : String(err))
-      setPhase('engine-error')
-    }
-  }
-
-  function nextStep() {
-    setPreviewUrl(null)
-    setPhase('idle')
-    if (step < STEPS.length - 1) {
-      setStep(step + 1)
-    } else {
-      finish(measures)
-    }
-  }
-
-  function finish(current: Partial<Record<FootView, FootMeasurement>>) {
-    const m = buildFootModel(current)
-    setModel(m)
-    db.footModels.add({
-      foot,
-      createdAt: Date.now(),
-      lengthMm: m.lengthMm,
-      widthMm: m.widthMm,
-      instepHeightMm: m.instepHeightMm,
-      ballWidthMm: m.ballWidthMm,
-      widthRatio: m.widthRatio,
-      volumeHint: m.volumeHint,
-      inconsistent: m.inconsistent,
-      source: 'opencv'
+      await db.footModels.add({
+        foot,
+        createdAt: Date.now(),
+        lengthMm: m.lengthMm,
+        widthMm: m.widthMm,
+        instepHeightMm: m.instepHeightMm,
+        ballWidthMm: m.ballWidthMm,
+        widthRatio: m.widthRatio,
+        volumeHint: m.volumeHint,
+        inconsistent: m.inconsistent,
+        source: 'opencv'
+      })
     })
-    setFinished(true)
-  }
-
-  function skipStep() {
-    const next = { ...measures }
-    delete next[stepInfo.view]
-    setMeasures(next)
-    setPreviewUrl(null)
-    setPhase('idle')
-    if (step < STEPS.length - 1) {
-      setStep(step + 1)
-    } else {
-      finish(next)
-    }
+    setPhase('saved')
   }
 
   async function handleManualSave() {
     const lengthMm = manual.lengthMm ? Number(manual.lengthMm) : null
     const widthMm = manual.widthMm ? Number(manual.widthMm) : null
     const instepHeightMm = manual.instepHeightMm ? Number(manual.instepHeightMm) : null
-    const ballWidthMm = manual.ballWidthMm ? Number(manual.ballWidthMm) : null
-    if ([lengthMm, widthMm, instepHeightMm, ballWidthMm].some((v) => v !== null && (!Number.isFinite(v) || v <= 0))) {
+    if ([lengthMm, widthMm, instepHeightMm].some((v) => v !== null && (!Number.isFinite(v) || v <= 0))) {
       setErrorText('Введите положительные числа в миллиметрах')
       return
     }
-    if (lengthMm === null && model?.lengthMm == null) {
+    if (lengthMm === null) {
       setErrorText('Укажите хотя бы длину стопы')
       return
     }
     setErrorText('')
     const m = buildFootModel({
-      top: lengthMm !== null && widthMm !== null ? ({ lengthMm, widthMm } as FootMeasurement) : null,
-      side: instepHeightMm !== null && lengthMm !== null ? ({ lengthMm, instepHeightMm } as FootMeasurement) : null,
-      front: ballWidthMm !== null ? ({ lengthMm: lengthMm ?? 0, ballWidthMm } as FootMeasurement) : null
+      top: widthMm !== null ? ({ view: 'top', lengthMm, widthMm } as FootMeasurement) : null,
+      side: instepHeightMm !== null ? ({ view: 'side', lengthMm, instepHeightMm } as FootMeasurement) : null
     })
-    const merged: FootModel = {
-      ...m,
-      lengthMm: m.lengthMm ?? model?.lengthMm ?? null,
-      widthMm: m.widthMm ?? model?.widthMm ?? null,
-      instepHeightMm: m.instepHeightMm ?? model?.instepHeightMm ?? null,
-      ballWidthMm: m.ballWidthMm ?? model?.ballWidthMm ?? null
-    }
-    merged.widthRatio =
-      merged.widthMm !== null && merged.lengthMm !== null && merged.lengthMm > 0
-        ? Math.round((merged.widthMm / merged.lengthMm) * 100) / 100
-        : null
     await db.footModels.add({
       foot,
       createdAt: Date.now(),
-      lengthMm: merged.lengthMm,
-      widthMm: merged.widthMm,
-      instepHeightMm: merged.instepHeightMm,
-      ballWidthMm: merged.ballWidthMm,
-      widthRatio: merged.widthRatio,
-      volumeHint: merged.volumeHint,
-      inconsistent: merged.inconsistent,
+      lengthMm: m.lengthMm,
+      widthMm: m.widthMm,
+      instepHeightMm: m.instepHeightMm,
+      ballWidthMm: null,
+      widthRatio: m.widthRatio,
+      volumeHint: m.volumeHint,
+      inconsistent: m.inconsistent,
       source: 'manual'
     })
-    setModel(merged)
+    setModel(m)
     setManualSaved(true)
+    setPhase('saved')
   }
 
   const volumeText = { low: 'низкий объём', medium: 'средний объём', high: 'высокий объём' } as const
 
-  if (finished && model) {
+  if (phase === 'saved' && model) {
     return (
       <main className="page">
         <h1 className="page-title">Модель {foot === 'left' ? 'левой' : 'правой'} стопы</h1>
-        <p className="page-subtitle">Собрано из {Object.keys(measures).length} из 3 ракурсов</p>
-
+        <p className="page-subtitle">Сохранено в профиль</p>
         <div className="card" style={{ display: 'grid', gap: 6 }}>
           {model.lengthMm !== null && <p className="hint">Длина: <strong>{model.lengthMm} мм</strong></p>}
           {model.widthMm !== null && <p className="hint">Ширина: <strong>{model.widthMm} мм</strong></p>}
           {model.instepHeightMm !== null && <p className="hint">Высота подъёма: <strong>{model.instepHeightMm} мм</strong></p>}
-          {model.ballWidthMm !== null && <p className="hint">Ширина переднего отдела: <strong>{model.ballWidthMm} мм</strong></p>}
           {model.widthRatio !== null && <p className="hint">Отношение ширины к длине: <strong>{model.widthRatio}</strong></p>}
           {model.volumeHint !== null && <p className="hint">Объём: <strong>{volumeText[model.volumeHint]}</strong></p>}
           {model.inconsistent && (
-            <p className="hint" style={{ color: '#ff7a7a' }}>
-              Замеры ракурсов заметно различаются (более 15 мм) — рекомендуем переснять.
-            </p>
+            <p className="hint" style={{ color: '#ff7a7a' }}>Замеры ракурсов заметно различаются — рекомендуем переснять.</p>
           )}
-          <p className="hint" style={{ color: 'var(--accent)' }}>Сохранено в профиль</p>
         </div>
+        <button className="btn btn-block" onClick={() => { setPhase('collect'); setStep(0); setStepState('idle'); setShots({}); setAnalysis({}); setPreviews({}); setModel(null) }}>
+          Новое сканирование
+        </button>
+      </main>
+    )
+  }
 
+  if (phase === 'analyzing') {
+    return (
+      <main className="page">
+        <h1 className="page-title">Анализ фото</h1>
+        <div className="card" style={{ display: 'grid', gap: 8 }}>
+          {cvState !== 'ready' ? (
+            <>
+              <p className="hint">
+                Загружаем движок анализа (~16 МБ). Рекомендуем Wi-Fi — на мобильной сети
+                загрузка может занять до минуты.
+              </p>
+              <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${engineProgress}%`, background: 'var(--accent)', transition: 'width 0.5s ease' }} />
+              </div>
+              <p className="hint" style={{ textAlign: 'right' }}>{engineProgress}%</p>
+            </>
+          ) : (
+            <p className="hint">{analyzingView || 'Подготовка…'}</p>
+          )}
+        </div>
+      </main>
+    )
+  }
+
+  if (phase === 'results') {
+    const anyMeasured = viewMeasured(analysis.top, 'top') || viewMeasured(analysis.side, 'side')
+    return (
+      <main className="page">
+        <h1 className="page-title">Результат анализа</h1>
+        <p className="page-subtitle">Проверьте, что нашлось на каждом фото</p>
+
+        {(['top', 'side'] as FootView[]).map((view, i) => {
+          const m = analysis[view]
+          const fail = failureHint(m, STEPS[i])
+          return (
+            <div key={view} className="card" style={{ display: 'grid', gap: 8 }}>
+              <p style={{ margin: 0, fontWeight: 600 }}>{STEPS[i].title}</p>
+              {previews[view] && <img src={previews[view]} alt={STEPS[i].title} style={{ width: '100%', borderRadius: 10 }} />}
+              {!fail && m ? (
+                <p className="hint" style={{ color: 'var(--accent)' }}>
+                  {view === 'top'
+                    ? <>Длина <strong>{m.lengthMm} мм</strong> · Ширина <strong>{m.widthMm} мм</strong></>
+                    : <>Высота подъёма <strong>{m.instepHeightMm} мм</strong> · Длина (кросс-проверка) {m.lengthMm} мм</>}
+                </p>
+              ) : (
+                <p className="hint" style={{ color: 'var(--accent)' }}>{fail}</p>
+              )}
+              <button className="btn btn-secondary btn-block" onClick={() => retake(view)}>
+                Переснять этот ракурс
+              </button>
+            </div>
+          )
+        })}
+
+        {errorText && (
+          <div className="card">
+            <p className="hint" style={{ color: '#ff7a7a' }}>Ошибка движка анализа: {errorText}</p>
+          </div>
+        )}
+
+        {anyMeasured && (
+          <button className="btn btn-block" onClick={saveModel}>Сохранить модель стопы</button>
+        )}
+        <button className="btn btn-secondary btn-block" onClick={() => { setPhase('collect'); setStep(1); setStepState(shots.side ? 'preview' : 'idle') }}>
+          Назад к фото
+        </button>
         {!manualOpen ? (
           <button className="btn btn-secondary btn-block" onClick={() => { setManualOpen(true); setManualSaved(false); setErrorText('') }}>
-            Дополнить вручную
+            Ввести размеры вручную
           </button>
         ) : (
           <div className="card" style={{ display: 'grid', gap: 10 }}>
-            <p style={{ margin: 0, fontWeight: 600 }}>Ручной ввод (недостающие замеры)</p>
+            <p style={{ margin: 0, fontWeight: 600 }}>Ручной ввод</p>
             {[
               ['lengthMm', 'Длина стопы, мм'],
               ['widthMm', 'Ширина стопы, мм'],
-              ['instepHeightMm', 'Высота подъёма, мм'],
-              ['ballWidthMm', 'Ширина переднего отдела, мм']
+              ['instepHeightMm', 'Высота подъёма, мм']
             ].map(([key, label]) => (
               <label key={key} className="hint">
                 {label}
@@ -353,18 +421,15 @@ export default function ScanPage() {
             </button>
           </div>
         )}
-
-        <button className="btn btn-block" onClick={() => { setFinished(false); setStep(0); setPhase('idle'); setMeasures({}); setPreviewUrl(null) }}>
-          Новое сканирование
-        </button>
       </main>
     )
   }
 
+  // phase === 'collect'
   return (
     <main className="page">
       <h1 className="page-title">Скан стопы</h1>
-      <p className="page-subtitle">Три ракурса — точная модель стопы</p>
+      <p className="page-subtitle">Два фото, затем анализ</p>
 
       <div className="card" style={{ display: 'flex', gap: 8 }}>
         {STEPS.map((s, i) => (
@@ -375,18 +440,22 @@ export default function ScanPage() {
               padding: '8px 4px',
               fontSize: 13,
               borderColor: i === step ? 'var(--accent)' : 'var(--border)',
-              color: i === step ? 'var(--accent)' : i < step ? 'var(--accent)' : undefined,
-              opacity: i <= step ? 1 : 0.5
+              color: i === step ? 'var(--accent)' : shots[s.view] ? 'var(--accent)' : undefined,
+              opacity: i <= step || shots[s.view] ? 1 : 0.5
             }}
           >
-            {i < step ? '✓ ' : ''}{i + 1}
+            {shots[s.view] ? '✓ ' : ''}{i + 1}
           </div>
         ))}
       </div>
 
       <div className="card">
         <p style={{ margin: '0 0 6px', fontWeight: 600 }}>{stepInfo.title}</p>
-        <p className="hint">{stepInfo.hint}</p>
+        <p className="hint">{stepInfo.why}</p>
+        <p className="hint" style={{ marginTop: 6 }}>
+          Рядом со стопой положите лист А4 или банковскую карту — целиком в кадр, на одном
+          полу со стопой. Снимайте при хорошем свете.
+        </p>
       </div>
 
       <div className="card" style={{ display: 'flex', gap: 8 }}>
@@ -394,7 +463,6 @@ export default function ScanPage() {
           className="btn btn-secondary btn-block"
           style={foot === 'left' ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
           onClick={() => setFoot('left')}
-          disabled={busy}
         >
           Левая
         </button>
@@ -402,7 +470,6 @@ export default function ScanPage() {
           className="btn btn-secondary btn-block"
           style={foot === 'right' ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
           onClick={() => setFoot('right')}
-          disabled={busy}
         >
           Правая
         </button>
@@ -417,65 +484,55 @@ export default function ScanPage() {
         onChange={handleFile}
       />
 
-      {phase === 'done' ? (
+      {stepState === 'preview' && shots[stepInfo.view] ? (
         <>
-          <button className="btn btn-block" onClick={nextStep}>
-            {step < STEPS.length - 1 ? 'Далее' : 'Построить модель стопы'}
-          </button>
-          <button className="btn btn-secondary btn-block" onClick={() => { setPhase('idle'); setPreviewUrl(null) }}>
+          <div className="card" style={{ padding: 8 }}>
+            <img src={shots[stepInfo.view]!.previewUrl} alt={stepInfo.title} style={{ width: '100%', borderRadius: 10 }} />
+          </div>
+          <button className="btn btn-block" onClick={() => setStepState('idle')}>
             Переснять
           </button>
+          {step === 0 ? (
+            <>
+              <button className="btn btn-block" onClick={() => { setStep(1); setStepState(shots.side ? 'preview' : 'idle') }}>
+                Далее
+              </button>
+              <button className="btn btn-secondary btn-block" disabled={!shots.side} onClick={analyze}>
+                Перейти к анализу
+              </button>
+            </>
+          ) : (
+            <button className="btn btn-block" onClick={analyze}>
+              Анализировать
+            </button>
+          )}
+          {step === 1 && (
+            <button className="btn btn-secondary btn-block" onClick={() => { setStep(0); setStepState(shots.top ? 'preview' : 'idle') }}>
+              Назад
+            </button>
+          )}
         </>
       ) : (
         <>
-          <button className="btn btn-block" disabled={busy} onClick={() => inputRef.current?.click()}>
-            {phase === 'loading-opencv'
-              ? 'Загружаем движок анализа…'
-              : phase === 'analyzing'
-                ? 'Анализ фото…'
-                : 'Сфотографировать'}
+          <button className="btn btn-block" onClick={() => inputRef.current?.click()}>
+            Сфотографировать / выбрать фото
           </button>
-          {phase !== 'idle' && (
-            <button className="btn btn-secondary btn-block" disabled={busy} onClick={skipStep}>
-              Пропустить ракурс
-            </button>
+          {step === 1 && (
+            <>
+              <button className="btn btn-secondary btn-block" disabled={!shots.top || !shots.side} onClick={analyze}>
+                Анализировать
+              </button>
+              <button className="btn btn-secondary btn-block" onClick={() => { setStep(0); setStepState(shots.top ? 'preview' : 'idle') }}>
+                Назад
+              </button>
+            </>
           )}
         </>
       )}
 
-      {phase === 'loading-opencv' && (
-        <div className="card" style={{ display: 'grid', gap: 8 }}>
-          <p className="hint">
-            Загружаем движок анализа (~16 МБ). Рекомендуем Wi-Fi — на мобильной сети
-            загрузка может занять до минуты.
-          </p>
-          <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${progress}%`, background: 'var(--accent)', transition: 'width 0.5s ease' }} />
-          </div>
-          <p className="hint" style={{ textAlign: 'right' }}>{progress}%</p>
-        </div>
-      )}
-
-      {previewUrl && <PreviewImage url={previewUrl} />}
-
-      {phase === 'no-reference' && (
+      {errorText && (
         <div className="card">
-          <p className="hint" style={{ color: 'var(--accent)' }}>{stepInfo.noReferenceHint}</p>
-        </div>
-      )}
-
-      {phase === 'no-foot' && (
-        <div className="card">
-          <p className="hint" style={{ color: '#ff7a7a' }}>{stepInfo.noFootHint}</p>
-        </div>
-      )}
-
-      {phase === 'engine-error' && (
-        <div className="card">
-          <p className="hint" style={{ color: '#ff7a7a' }}>
-            Не удалось загрузить или запустить движок анализа: {errorText}.
-            Проверьте соединение (при первом запуске нужен интернет) и попробуйте снова.
-          </p>
+          <p className="hint" style={{ color: '#ff7a7a' }}>{errorText}</p>
         </div>
       )}
     </main>
