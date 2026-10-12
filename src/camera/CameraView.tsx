@@ -30,10 +30,11 @@ import {
 } from './canonicalFoot'
 import { canvasToBlob, fileToImageData } from './imageIO'
 
-const ANALYSIS_DIM = 640 // длинная сторона кадра для сегментации
+const ANALYSIS_DIM = 640 // длинная сторона полного анализ-кадра
+const CROP_DIM = 560 // длинная сторона кропа зоны рамки для сегментации
+const CROP_MIN_FOOT_FRAC = 0.005 // <0.5% кропа — стопа не найдена
 const CAPTURE_DIM = 1600
-const LOOP_MS = 350
-const MIN_FOOT_FRACTION = 0.004 // <0.4% кадра — стопа не найдена
+const LOOP_MS = 400
 const OPEN_TIMEOUT_MS = 8000 // таймаут открытия камеры (Android-фриз getUserMedia)
 const WATCHDOG_MS = 15_000 // зависший segment()/fetch держит busyRef дольше обычного кадра (<3 с)
 
@@ -59,23 +60,21 @@ interface CameraViewProps {
 }
 
 type CameraState = 'starting' | 'live' | 'denied'
-type FrameStatus = 'loading' | 'error' | 'none' | 'partial' | 'far' | 'ok'
+type FrameStatus = 'loading' | 'error' | 'none' | 'partial' | 'ok'
 
 const STATUS_COLOR: Record<FrameStatus, string> = {
   loading: '#8a8a8a',
   error: '#8a8a8a',
   none: '#f87171',
   partial: '#e8c547',
-  far: '#e8c547',
   ok: '#4ade80'
 }
 
 const STATUS_TEXT: Record<FrameStatus, string> = {
   loading: 'Загрузка модели сегментации…',
   error: 'Модель недоступна — снимайте по подсказкам',
-  none: 'Стопа не найдена — придвиньте стопу в кадр',
+  none: 'Стопа не найдена — наведите рамку на стопу',
   partial: 'Отодвиньте — вся стопа не влезает в кадр',
-  far: 'Придвиньте стопу к рамке',
   ok: 'Стопа в кадре ✓'
 }
 
@@ -322,7 +321,9 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     let stopped = false
     const frameCanvas = document.createElement('canvas')
     const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true })!
-    // Темповый canvas для дельта-зон (сетка → растянуть на bbox маски).
+    // Кроп зоны рамки (источник для сегментации) и темповый canvas дельта-зон.
+    const cropCanvas = document.createElement('canvas')
+    const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true })!
     const deltaCanvas = document.createElement('canvas')
     const deltaCtx = deltaCanvas.getContext('2d')!
 
@@ -351,9 +352,28 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
           frameCanvas.height = h
         }
         frameCtx.drawImage(video, 0, 0, w, h)
-        const imageData = frameCtx.getImageData(0, 0, w, h)
 
-        const personMask = await getPersonMask(imageData)
+        // Сегментируем ТОЛЬКО зону рамки + 12% запас: ищем не по всему кадру
+        // (пользователь держит камеру верно), меньше картинка — segment()
+        // быстрее и короче блокировки главного потока.
+        const fg = guideRect(w, h)
+        const mrgX = fg.w * 0.12
+        const mrgY = fg.h * 0.12
+        const cx0 = Math.max(0, Math.round(fg.x - mrgX))
+        const cy0 = Math.max(0, Math.round(fg.y - mrgY))
+        const cw = Math.min(w - cx0, Math.round(fg.w + 2 * mrgX))
+        const ch = Math.min(h - cy0, Math.round(fg.h + 2 * mrgY))
+        const cropScale = Math.min(1, CROP_DIM / Math.max(cw, ch))
+        const crw = Math.max(1, Math.round(cw * cropScale))
+        const crh = Math.max(1, Math.round(ch * cropScale))
+        if (cropCanvas.width !== crw || cropCanvas.height !== crh) {
+          cropCanvas.width = crw
+          cropCanvas.height = crh
+        }
+        cropCtx.drawImage(frameCanvas, cx0, cy0, cw, ch, 0, 0, crw, crh)
+        const cropData = cropCtx.getImageData(0, 0, crw, crh)
+
+        const personMask = await getPersonMask(cropData)
         if (stopped) return
         if (!personMask) {
           setStatus(nnState === 'error' ? 'error' : 'loading')
@@ -365,11 +385,16 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const bin = personBinFromCategories(personMask.mask)
         // Бумага/лист не должны попадать в силуэт (иначе канон фиттится на
         // лист) — исключаем paper-like компоненты по яркости/насыщенности.
-        const noPaper = filterPaperComponents(bin, mw, mh, imageData.data)
+        const noPaper = filterPaperComponents(bin, mw, mh, cropData.data)
         const comp = largestComponent(noPaper, mw, mh)
-        const compBin = comp && comp.area >= mw * mh * MIN_FOOT_FRACTION ? comp.bin : null
-        const contour = compBin ? maskToContour(compBin, mw, mh) : null
-        const next = frameStatus(contour, mw, mh)
+        const compBin = comp && comp.area >= mw * mh * CROP_MIN_FOOT_FRAC ? comp.bin : null
+        // Контур сразу переводим в координаты полного анализ-кадра
+        // (оверлей масштабирует из них же).
+        const contourCrop = compBin ? maskToContour(compBin, mw, mh) : null
+        const contour = contourCrop
+          ? contourCrop.map((p) => ({ x: p.x / cropScale + cx0, y: p.y / cropScale + cy0 }))
+          : null
+        const next = frameStatusCrop(contourCrop, mw, mh)
         setStatus(next)
 
         // Канонический силуэт: стабильная форма вместо сырого дёргающегося
@@ -394,11 +419,27 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
           canonPts = transformCanon(canonForView(view === 'side' ? 'side' : 'top'), canonT)
           if (compBin) delta = deltaMask(compBin, mw, mh, canonPts, 4)
         }
-        drawOverlay(contour, next, mw, mh, {
-          canon: canonPts,
+        // Канон и дельта из кроп-координат в полный анализ-кадр.
+        const fullCanon = canonT
+          ? {
+              cx: canonT.cx / cropScale + cx0,
+              cy: canonT.cy / cropScale + cy0,
+              scale: canonT.scale / cropScale,
+              angle: canonT.angle,
+              quality: canonT.quality
+            }
+          : null
+        const canonFull = fullCanon
+          ? transformCanon(canonForView(view === 'side' ? 'side' : 'top'), fullCanon)
+          : null
+        const deltaFull = delta
+          ? { ...delta, x0: delta.x0 / cropScale + cx0, y0: delta.y0 / cropScale + cy0, step: delta.step / cropScale }
+          : null
+        drawOverlay(contour, next, w, h, {
+          canon: canonFull,
           quality: canonT?.quality ?? 0,
           age: canonT && canonRef.current ? now - canonRef.current.lastSeen : 0,
-          delta
+          delta: deltaFull
         })
 
         // Автоопределение левой/правой — только на стабильном top-кадре.
@@ -421,16 +462,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       }
     }
 
-    const frameStatus = (contour: { x: number; y: number }[] | null, mw: number, mh: number): FrameStatus => {
+    // Статусы по кропу: вне рамки ничего не ищем — кроп И ЕСТЬ зона поиска.
+    // Мало person-пикселей → 'none'; касание краёв кропа → 'partial' (стопа
+    // не влезает); иначе → 'ok'. 'far' не нужен — искать вне рамки нечего.
+    const frameStatusCrop = (contour: { x: number; y: number }[] | null, cw: number, ch: number): FrameStatus => {
       if (!contour) return 'none'
       const { x0, y0, x1, y1 } = contourBBox(contour)
       const area = (x1 - x0) * (y1 - y0)
-      if (area / (mw * mh) < MIN_FOOT_FRACTION) return 'none'
-      const edge = Math.max(mw, mh) * 0.015
-      if (x0 <= edge || y0 <= edge || x1 >= mw - edge || y1 >= mh - edge) return 'partial'
-      const g = guideRect(mw, mh)
-      if (x0 >= g.x && x1 <= g.x + g.w && y0 >= g.y && y1 <= g.y + g.h) return 'ok'
-      return 'far'
+      if (area / (cw * ch) < CROP_MIN_FOOT_FRAC) return 'none'
+      const edge = Math.max(cw, ch) * 0.015
+      if (x0 <= edge || y0 <= edge || x1 >= cw - edge || y1 >= ch - edge) return 'partial'
+      return 'ok'
     }
 
     const drawOverlay = (
