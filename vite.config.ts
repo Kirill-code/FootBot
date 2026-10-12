@@ -7,6 +7,11 @@ export default defineConfig({
     exclude: ['node_modules/**', 'dist/**', 'tools/**']
   },
   base: './',
+  // Module workers с код-сплиттингом (worker разделяет ленивый opencv-чанк
+  // с главным потоком) — только ES-формат, iife его не поддерживает.
+  worker: {
+    format: 'es'
+  },
   plugins: [
     react(),
     VitePWA({

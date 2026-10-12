@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
-import { loadOpenCv, subscribeOpenCvState, type OpenCvLoadState } from '../analysis/opencvLoader'
 import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
 import CameraView, { type CameraShot } from './CameraView'
@@ -71,29 +70,6 @@ function drawPreview(canvas: HTMLCanvasElement, contour?: FootContourPoint[]): s
   return preview.toDataURL('image/jpeg', 0.85)
 }
 
-/** Прогресс загрузки движка: реальные байты недоступны, показываем плавный ход. */
-function useLoadingProgress(active: boolean, done: boolean): number {
-  const [progress, setProgress] = useState(0)
-  useEffect(() => {
-    if (!active) {
-      setProgress(0)
-      return
-    }
-    if (done) {
-      setProgress(100)
-      return
-    }
-    const started = Date.now()
-    const timer = setInterval(() => {
-      const elapsed = (Date.now() - started) / 1000
-      const estimate = Math.min(95, (elapsed / 45) * 100)
-      setProgress((p) => Math.max(p, Math.round(estimate)))
-    }, 500)
-    return () => clearInterval(timer)
-  }, [active, done])
-  return progress
-}
-
 /** Есть ли по ракурсу целевая метрика. */
 function viewMeasured(m: FootMeasurement | undefined, view: FootView): boolean {
   if (!m) return false
@@ -112,8 +88,6 @@ export default function ScanPage() {
   const [step, setStep] = useState(0)
   const [phase, setPhase] = useState<Phase>('collect')
   const [stepState, setStepState] = useState<StepState>('idle')
-  const [cvState, setCvState] = useState<OpenCvLoadState>('idle')
-  const engineProgress = useLoadingProgress(phase === 'analyzing' && cvState !== 'ready', cvState === 'ready')
   const [analyzingView, setAnalyzingView] = useState<string>('')
   const [sockWarn, setSockWarn] = useState(false)
   const [shots, setShots] = useState<Partial<Record<FootView, Shot>>>({})
@@ -124,8 +98,6 @@ export default function ScanPage() {
   const [manualOpen, setManualOpen] = useState(false)
   const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
-
-  useEffect(() => subscribeOpenCvState(setCvState), [])
 
   const stepInfo = STEPS[step]
 
@@ -154,42 +126,44 @@ export default function ScanPage() {
     setPhase('analyzing')
     setErrorText('')
     setSockWarn(false)
+    // Смена подписи + пауза, чтобы UI успел отрисоваться перед тяжёлым шагом.
+    const phase = async (label: string) => {
+      setAnalyzingView(label)
+      await new Promise((r) => setTimeout(r, 30))
+    }
     try {
-      // 1. Движок (лениво, singleton) — один раз на оба ракурса.
-      await loadOpenCv()
-      const { measureFoot } = await import('../analysis/measureFoot')
-      // 1б. Модель NN-сегментации (~17 МБ, один раз). Не критична —
-      // при недоступности работает классический анализ.
+      // 1. Модель NN-сегментации (~17 МБ, один раз; главный поток, tasks-vision).
       let nnOk = false
       try {
-        setAnalyzingView('Загружаем модель сегментации (~17 МБ, один раз)…')
+        await phase('Загружаем модель сегментации (~17 МБ, один раз)…')
         const { loadPersonSegmenter } = await import('../analysis/personSegment')
-        await loadPersonSegmenter()
-        nnOk = true
+        nnOk = (await loadPersonSegmenter()) !== null
       } catch {
         /* классика как fallback */
       }
+      const { measureFootAsync } = await import('../analysis/measureFootClient')
       const results: Partial<Record<FootView, FootMeasurement>> = {}
       const pv: Partial<Record<FootView, string>> = {}
       let sock = false
-      // 2. Анализ top.
+      // 2. Анализ top — в Web Worker: UI живой, OpenCV не блокирует поток.
       if (shots.top) {
-        setAnalyzingView('Фото 1/2 — стопа сверху…')
+        await phase('Анализируем фото 1/2 (сверху)…')
         const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(shots.top.imageData) : null
-        const m = measureFoot(shots.top.imageData, { view: 'top', personMask })
+        const m = await measureFootAsync(shots.top.imageData, 'top', personMask)
         sock = sock || m.sockDetected
         results.top = m
         pv.top = drawPreview(shots.top.canvas, m.footContour)
       }
       // 3. Анализ side.
       if (shots.side) {
-        setAnalyzingView('Фото 2/2 — стопа сбоку…')
+        await phase('Анализируем фото 2/2 (сбоку)…')
         const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(shots.side.imageData) : null
-        const m = measureFoot(shots.side.imageData, { view: 'side', personMask })
+        const m = await measureFootAsync(shots.side.imageData, 'side', personMask)
         sock = sock || m.sockDetected
         results.side = m
         pv.side = drawPreview(shots.side.canvas, m.footContour)
       }
+      await phase('Строим модель стопы…')
       setSockWarn(sock)
       setAnalysis(results)
       setPreviews(pv)
@@ -309,21 +283,12 @@ export default function ScanPage() {
     return (
       <main className="page">
         <h1 className="page-title">Анализ фото</h1>
-        <div className="card" style={{ display: 'grid', gap: 8 }}>
-          {cvState !== 'ready' ? (
-            <>
-              <p className="hint">
-                Загружаем движок анализа (~16 МБ). Рекомендуем Wi-Fi — на мобильной сети
-                загрузка может занять до минуты.
-              </p>
-              <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${engineProgress}%`, background: 'var(--accent)', transition: 'width 0.5s ease' }} />
-              </div>
-              <p className="hint" style={{ textAlign: 'right' }}>{engineProgress}%</p>
-            </>
-          ) : (
-            <p className="hint">{analyzingView || 'Подготовка…'}</p>
-          )}
+        <div className="card" style={{ display: 'grid', gap: 14, justifyItems: 'center', padding: '28px 16px' }}>
+          <div className="spinner" aria-label="Анализ идёт" />
+          <p className="hint" style={{ margin: 0, textAlign: 'center' }}>{analyzingView || 'Подготовка…'}</p>
+          <p className="hint" style={{ margin: 0, textAlign: 'center', color: 'var(--text-dim)' }}>
+            Обычно 10–60 секунд, не закрывайте страницу.
+          </p>
         </div>
       </main>
     )
