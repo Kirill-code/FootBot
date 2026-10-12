@@ -191,6 +191,7 @@ function getSegWorker(): Worker | null {
     segWorker.onmessage = (e: MessageEvent) => {
       const msg = e.data as
         | { type: 'state'; state: PersonSegmentState }
+        | { type: 'log'; text: string }
         | { type: 'segment'; id: number; mask: Uint8Array | null; width: number; height: number }
       if (msg.type === 'state') {
         setState(msg.state)
