@@ -6,10 +6,12 @@ import ProfilePage from '../profile/ProfilePage'
 import RecommendationsPage from '../matching/RecommendationsPage'
 import CatalogPage from '../catalog/CatalogPage'
 import CatalogDetailPage from '../catalog/CatalogDetailPage'
+import DebugOverlay from './DebugOverlay'
 
 export default function App() {
   return (
     <HashRouter>
+      <DebugOverlay />
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<HomePage />} />

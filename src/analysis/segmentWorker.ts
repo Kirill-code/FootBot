@@ -63,7 +63,8 @@ function ensureInit(): Promise<boolean> {
         }
         postState('ready')
         return true
-      } catch {
+      } catch (e) {
+        ctx.postMessage({ type: 'log', text: `[segmentWorker] init failed: ${String(e)}` })
         postState('error')
         initPromise = null // следующий вызов попробует заново
         return false

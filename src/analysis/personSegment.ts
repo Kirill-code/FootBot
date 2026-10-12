@@ -196,18 +196,24 @@ function getSegWorker(): Worker | null {
         setState(msg.state)
         return
       }
+      if (msg.type === 'log') {
+        console.error(msg.text)
+        return
+      }
       const p = segPending.get(msg.id)
       if (!p) return
       segPending.delete(msg.id)
       clearTimeout(p.timer)
       p.resolve(msg.mask ? { mask: msg.mask, width: msg.width, height: msg.height } : null)
     }
-    segWorker.onerror = () => {
+    segWorker.onerror = (e) => {
+      console.error('[segmentWorker] onerror:', e.message, e.filename, e.lineno)
       segWorkerFailed = true
       destroySegWorker()
       setState('error')
     }
-    segWorker.onmessageerror = () => {
+    segWorker.onmessageerror = (e) => {
+      console.error('[segmentWorker] onmessageerror:', String(e))
       segWorkerFailed = true
       destroySegWorker()
       setState('error')
