@@ -42,10 +42,22 @@ export function getPersonSegmentError(): unknown {
   return lastError
 }
 
+/** Запросы на сброс сегментатора (после ошибок сегментации). */
+let segmenterReset: (() => void) | null = null
+
+function resetSegmenterSingleton() {
+  segmenterReset?.()
+}
+
 /** Singleton-загрузка сегментатора. null — недоступен (сеть/ошибка), классика. */
 export function loadPersonSegmenter(): Promise<ImageSegmenter | null> {
   if (!loadPromise) {
     loadPromise = doLoad()
+    segmenterReset = () => {
+      loadPromise = null
+      segmenterReset = null
+      setState('idle')
+    }
   }
   return loadPromise
 }
@@ -72,24 +84,42 @@ async function doLoad(): Promise<ImageSegmenter | null> {
   }
 }
 
+// Переиспользуемый canvas — не плодим DOM-элемент на каждый кадр.
+let frameCanvas: HTMLCanvasElement | null = null
+
 /**
  * Сегментирует кадр: классы 0..5 (0 фон, 1 волосы, 2 кожа тела, 3 кожа лица,
  * 4 одежда, 5 аксессуары). person = 2|3|4.
  * @returns маска классов + размеры, или null при любой недоступности.
+ * При ошибке самого сегментатора — одна попытка мягкого пересоздания,
+ * чтобы live-цикл не залипал на протухшем состоянии.
  */
 export async function getPersonMask(imageData: ImageData): Promise<PersonMask | null> {
   const segmenter = await loadPersonSegmenter()
   if (!segmenter) return null
-  const canvas = document.createElement('canvas')
-  canvas.width = imageData.width
-  canvas.height = imageData.height
-  canvas.getContext('2d')!.putImageData(imageData, 0, 0)
-  const result = segmenter.segment(canvas)
-  const mask = result.categoryMask
-  if (!mask) return null
-  return {
-    mask: mask.getAsUint8Array(),
-    width: mask.width,
-    height: mask.height
+  if (!frameCanvas) frameCanvas = document.createElement('canvas')
+  frameCanvas.width = imageData.width
+  frameCanvas.height = imageData.height
+  frameCanvas.getContext('2d')!.putImageData(imageData, 0, 0)
+  try {
+    const result = segmenter.segment(frameCanvas)
+    const mask = result.categoryMask
+    if (!mask) return null
+    return {
+      mask: mask.getAsUint8Array(),
+      width: mask.width,
+      height: mask.height
+    }
+  } catch (e) {
+    // MediaPipe может протухнуть (внутренняя ошибка графа) — сбрасываем
+    // singleton, следующий кадр пересоздаст сегментатор.
+    lastError = e
+    try {
+      segmenter.close()
+    } catch {
+      /* уже закрыт */
+    }
+    resetSegmenterSingleton()
+    return null
   }
 }
