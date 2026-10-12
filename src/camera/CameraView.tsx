@@ -87,6 +87,154 @@ function contourBBox(pts: { x: number; y: number }[]) {
   return { x0, y0, x1, y1 }
 }
 
+const GHOST_STROKE = 'rgba(255, 255, 255, 0.4)'
+const GHOST_TEXT = 'rgba(255, 255, 255, 0.6)'
+
+type Corner = 'tl' | 'tr' | 'bl' | 'br'
+
+/** Угол рамки, противоположный центру масс маски (по умолчанию — правый нижний). */
+function oppositeCorner(contour: { x: number; y: number }[] | null, cw: number, ch: number): Corner {
+  if (!contour || contour.length === 0) return 'br'
+  let sx = 0
+  let sy = 0
+  for (const p of contour) {
+    sx += p.x
+    sy += p.y
+  }
+  const cx = sx / contour.length
+  const cy = sy / contour.length
+  return ((cy < ch / 2 ? 'b' : 't') + (cx < cw / 2 ? 'r' : 'l')) as Corner
+}
+
+/** Пунктирный «призрачный» силуэт стопы анфас + стрелка «пальцы от вас». */
+function drawTopGhost(ctx: CanvasRenderingContext2D, g: GuideRect) {
+  const cx = g.x + g.w / 2
+  const fh = g.h * 0.78
+  const fw = Math.min(g.w * 0.32, fh * 0.42)
+  const gy = g.y + (g.h - fh) / 2
+  ctx.save()
+  ctx.strokeStyle = GHOST_STROKE
+  ctx.lineWidth = 1.5
+  ctx.setLineDash([5, 5])
+  // Пятка.
+  ctx.beginPath()
+  ctx.ellipse(cx, gy + fh * 0.8, fw * 0.44, fh * 0.18, 0, 0, Math.PI * 2)
+  ctx.stroke()
+  // Тело стопы.
+  ctx.beginPath()
+  ctx.ellipse(cx, gy + fh * 0.45, fw * 0.5, fh * 0.32, 0, 0, Math.PI * 2)
+  ctx.stroke()
+  // Пять пальцев — округлые дугой, большой в центре.
+  const toeY = gy + fh * 0.1
+  const radii = [0.17, 0.14, 0.12, 0.1, 0.085]
+  for (let i = 0; i < 5; i++) {
+    const t = (i - 2) / 2
+    ctx.beginPath()
+    ctx.arc(cx + t * fw * 0.42, toeY + Math.abs(t) * fh * 0.05, fw * radii[i], 0, Math.PI * 2)
+    ctx.stroke()
+  }
+  ctx.setLineDash([])
+  // Стрелка вверх + подпись «пальцы от вас».
+  const ay0 = gy - fh * 0.06
+  const ay1 = g.y + g.h * 0.015
+  ctx.strokeStyle = GHOST_TEXT
+  ctx.fillStyle = GHOST_TEXT
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(cx, ay0)
+  ctx.lineTo(cx, Math.max(ay1, ay0 - fh * 0.12))
+  ctx.stroke()
+  const ahY = Math.max(ay1, ay0 - fh * 0.12)
+  ctx.beginPath()
+  ctx.moveTo(cx - 5, ahY + 7)
+  ctx.lineTo(cx, ahY)
+  ctx.lineTo(cx + 5, ahY + 7)
+  ctx.closePath()
+  ctx.fill()
+  ctx.font = `${Math.max(10, Math.round(g.w / 30))}px system-ui, sans-serif`
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('пальцы от вас', cx + 10, (ay0 + ahY) / 2)
+  ctx.restore()
+}
+
+/** Пунктирный «призрачный» силуэт стопы профилем (пятка слева, носок справа). */
+function drawSideGhost(ctx: CanvasRenderingContext2D, g: GuideRect) {
+  const x0 = g.x + g.w * 0.18
+  const x1 = g.x + g.w * 0.82
+  const span = x1 - x0
+  const floorY = g.y + g.h * 0.74
+  const topY = g.y + g.h * 0.32
+  ctx.save()
+  ctx.strokeStyle = GHOST_STROKE
+  ctx.lineWidth = 1.5
+  ctx.setLineDash([5, 5])
+  ctx.beginPath()
+  ctx.moveTo(x0 + span * 0.06, floorY) // задняя точка подошвы
+  ctx.quadraticCurveTo(x0 - span * 0.02, floorY - (floorY - topY) * 0.5, x0 + span * 0.04, topY + (floorY - topY) * 0.2) // задник пятки
+  ctx.quadraticCurveTo(x0 + span * 0.06, topY, x0 + span * 0.24, topY) // верх пятки
+  ctx.quadraticCurveTo(x0 + span * 0.55, topY - (floorY - topY) * 0.08, x1 - span * 0.16, topY + (floorY - topY) * 0.18) // выпуклый свод к носку
+  ctx.quadraticCurveTo(x1 - span * 0.05, topY + (floorY - topY) * 0.3, x1, floorY - (floorY - topY) * 0.14) // носок
+  ctx.quadraticCurveTo(x1 + span * 0.01, floorY - 2, x1 - span * 0.08, floorY) // кончик носка
+  ctx.lineTo(x0 + span * 0.06, floorY) // подошва
+  ctx.closePath()
+  ctx.stroke()
+  // Линия пола.
+  ctx.beginPath()
+  ctx.moveTo(g.x + g.w * 0.08, floorY + 3)
+  ctx.lineTo(g.x + g.w * 0.92, floorY + 3)
+  ctx.stroke()
+  ctx.restore()
+}
+
+/** Пунктирный placeholder банковской карты (85.6×54, ratio 1.586) в углу рамки. */
+function drawCardGhost(ctx: CanvasRenderingContext2D, g: GuideRect, corner: Corner) {
+  const cardW = Math.min(g.w * 0.24, g.h * 0.34 * 1.586)
+  const cardH = cardW / 1.586
+  const m = 8
+  const x = corner === 'tl' || corner === 'bl' ? g.x + m : g.x + g.w - m - cardW
+  const y = corner === 'tl' || corner === 'tr' ? g.y + m : g.y + g.h - m - cardH
+  ctx.save()
+  ctx.strokeStyle = GHOST_TEXT
+  ctx.lineWidth = 1.5
+  ctx.setLineDash([4, 4])
+  ctx.strokeRect(x, y, cardW, cardH)
+  ctx.setLineDash([])
+  ctx.fillStyle = GHOST_TEXT
+  ctx.font = `${Math.max(9, Math.round(cardH * 0.2))}px system-ui, sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText('карта сюда', x + cardW / 2, y + cardH / 2)
+  ctx.restore()
+}
+
+/** Текстовая шапка видоискателя: цель шага + постоянные напоминания. */
+function drawHeader(ctx: CanvasRenderingContext2D, cw: number, view: FootView) {
+  const title = view === 'top' ? 'Снимаем СВЕРХУ: длина и ширина' : 'Снимаем СБОКУ: высота подъёма'
+  const sub =
+    view === 'top'
+      ? 'Вся стопа целиком: пятка и все пальцы в кадре'
+      : 'Камера у уровня пола: видны и пятка, и носок, стопа стоит на полу'
+  const fsTitle = Math.max(14, Math.round(cw / 24))
+  const fsSub = Math.max(10, Math.round(cw / 42))
+  const pad = 10
+  const barH = pad * 2 + fsTitle + 4 + fsSub + 3 + fsSub
+  ctx.save()
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'
+  ctx.fillRect(0, 0, cw, barH)
+  ctx.textBaseline = 'top'
+  ctx.fillStyle = '#ffffff'
+  ctx.font = `600 ${fsTitle}px system-ui, sans-serif`
+  ctx.textAlign = 'left'
+  ctx.fillText(title, pad, pad)
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.78)'
+  ctx.font = `${fsSub}px system-ui, sans-serif`
+  ctx.fillText(sub, pad, pad + fsTitle + 4)
+  ctx.fillStyle = 'rgba(232, 197, 71, 0.95)'
+  ctx.fillText('босиком, без носков', pad, pad + fsTitle + 4 + fsSub + 3)
+  ctx.restore()
+}
+
 export default function CameraView({ view, onCapture, foot, onFootGuess }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
@@ -237,6 +385,11 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
       ctx.clearRect(0, 0, cw, ch)
       const sx = cw / (mw ?? ANALYSIS_DIM)
       const sy = ch / (mh ?? ANALYSIS_DIM * 0.75)
+      const g = guideRect(cw, ch)
+
+      // «Призрачные» гайды по ракурсу — под живой маской, тонким пунктиром.
+      if (view === 'top') drawTopGhost(ctx, g)
+      else drawSideGhost(ctx, g)
 
       // Силуэт: полупрозрачная заливка + плавный контур.
       if (contour && contour.length >= 3) {
@@ -253,12 +406,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
       }
 
       // Рамка гайда.
-      const g = guideRect(cw, ch)
       ctx.strokeStyle = STATUS_COLOR[st]
       ctx.lineWidth = 3
       ctx.setLineDash([10, 8])
       ctx.strokeRect(g.x, g.y, g.w, g.h)
       ctx.setLineDash([])
+
+      // Зона банковской карты (только top, статичный placeholder).
+      if (view === 'top') drawCardGhost(ctx, g, oppositeCorner(contour, cw, ch))
+
+      // Текстовая шапка поверх всего.
+      drawHeader(ctx, cw, view)
     }
 
     const timer = setInterval(() => void analyze(), LOOP_MS)
@@ -333,9 +491,10 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
   }
 
   const color = STATUS_COLOR[status]
+  // На шаге top жёлтые статусы и «ок» подсказывают про карту в углу рамки.
   const hintText =
     view === 'top'
-      ? `${STATUS_TEXT[status]} · рядом со стопой положите лист А4`
+      ? `${STATUS_TEXT[status]} · положите банковскую карту в углу рамки (или лист А4, если камера высоко)`
       : STATUS_TEXT[status]
 
   return (
