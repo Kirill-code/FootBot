@@ -42,8 +42,12 @@ export function getPersonSegmentError(): unknown {
   return lastError
 }
 
-/** Запросы на сброс сегментатора (после ошибок сегментации). */
+/** Запросы на сброс сегментатора (после ошибок сегментации/зависаний). */
 let segmenterReset: (() => void) | null = null
+
+/** Поколение загрузки: инкрементируется при сбросе. doLoad чужого поколения
+ * не публикует устаревший сегментатор/состояние (гонка reset vs завершение). */
+let generation = 0
 
 function resetSegmenterSingleton() {
   segmenterReset?.()
@@ -54,15 +58,42 @@ export function loadPersonSegmenter(): Promise<ImageSegmenter | null> {
   if (!loadPromise) {
     loadPromise = doLoad()
     segmenterReset = () => {
+      generation++
+      const stale = loadPromise
       loadPromise = null
       segmenterReset = null
       setState('idle')
+      // Устаревший экземпляр, если он всё же материализовался — закрываем.
+      stale
+        ?.then((seg) => {
+          try {
+            seg?.close()
+          } catch {
+            /* уже закрыт */
+          }
+        })
+        .catch(() => undefined)
     }
   }
   return loadPromise
 }
 
+const MODEL_FETCH_TIMEOUT_MS = 25_000
+
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Blob> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const resp = await fetch(url, { signal: ctrl.signal })
+    if (!resp.ok) throw new Error(`Скачивание модели: HTTP ${resp.status}`)
+    return await resp.blob()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function doLoad(): Promise<ImageSegmenter | null> {
+  const gen = generation
   setState('loading')
   try {
     // base './' (HashRouter/PWA на GH Pages): ассеты от корня приложения.
@@ -70,18 +101,48 @@ async function doLoad(): Promise<ImageSegmenter | null> {
     const wasmPath = new URL('mediapipe/', new URL(base, document.baseURI)).href
     const { FilesetResolver, ImageSegmenter } = await loadTasksVision()
     const vision = await FilesetResolver.forVisionTasks(wasmPath)
-    const segmenter = await ImageSegmenter.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
-      runningMode: 'IMAGE',
-      outputCategoryMask: true
-    })
+    // Модель качаем сами, с таймаутом: createFromOptions фетчил бы её без
+    // всякого лимита — зависший fetch мёртво залипал бы live-цикл.
+    const modelBlob = await fetchWithTimeout(MODEL_URL, MODEL_FETCH_TIMEOUT_MS)
+    const modelUrl = URL.createObjectURL(modelBlob)
+    let segmenter: ImageSegmenter | null = null
+    try {
+      segmenter = await ImageSegmenter.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: modelUrl, delegate: 'CPU' },
+        runningMode: 'IMAGE',
+        outputCategoryMask: true
+      })
+    } finally {
+      URL.revokeObjectURL(modelUrl)
+    }
+    if (gen !== generation) {
+      // Пока грузили — вызвали reset: экземпляр не публикуем.
+      try {
+        segmenter?.close()
+      } catch {
+        /* уже закрыт */
+      }
+      return null
+    }
     setState('ready')
     return segmenter
   } catch (e) {
-    lastError = e
-    setState('error')
+    if (gen === generation) {
+      lastError = e
+      setState('error')
+    }
+    // Ошибку не кешируем — следующий вызов попробует загрузить заново.
+    loadPromise = null
+    segmenterReset = null
     return null
   }
+}
+
+/** Принудительный сброс сегментатора (watchdog CameraView): закрывает текущий
+ * экземпляр (если он уже создан) и сбрасывает singleton — следующий кадр
+ * пересоздаст сегментатор с нуля. */
+export function resetPersonSegmenter(): void {
+  resetSegmenterSingleton()
 }
 
 // Переиспользуемый canvas — не плодим DOM-элемент на каждый кадр.

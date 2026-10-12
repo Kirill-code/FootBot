@@ -11,6 +11,7 @@ import type { FootSide } from '../profile/db'
 import {
   getPersonMask,
   loadPersonSegmenter,
+  resetPersonSegmenter,
   subscribePersonSegmentState,
   type PersonSegmentState
 } from '../analysis/personSegment'
@@ -23,6 +24,7 @@ const CAPTURE_DIM = 1600
 const LOOP_MS = 350
 const MIN_FOOT_FRACTION = 0.004 // <0.4% кадра — стопа не найдена
 const OPEN_TIMEOUT_MS = 8000 // таймаут открытия камеры (Android-фриз getUserMedia)
+const WATCHDOG_MS = 15_000 // зависший segment()/fetch держит busyRef дольше обычного кадра (<3 с)
 
 export interface CameraShot {
   blob: Blob
@@ -381,6 +383,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       const video = videoRef.current
       if (!video || !video.videoWidth) return
       busyRef.current = true
+      // Watchdog: segment() может зависнуть ВНУТРИ wasm без исключения, а
+      // fetch модели — без таймаута: await тогда никогда не разрешится и
+      // цикл мёртв без единой ошибки. 15 с с запасом — штатный кадр <3 с.
+      const watchdog = setTimeout(() => {
+        if (stopped) return
+        busyRef.current = false
+        // Не оставляем застывшую обводку: чистим оверлей, статус «загрузка».
+        drawOverlay(null, 'loading')
+        setStatus('loading')
+        void resetPersonSegmenter()
+      }, WATCHDOG_MS)
       try {
         const scale = Math.min(1, ANALYSIS_DIM / Math.max(video.videoWidth, video.videoHeight))
         const w = Math.max(1, Math.round(video.videoWidth * scale))
@@ -422,6 +435,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       } catch {
         /* кадр пропущен — следующий через LOOP_MS */
       } finally {
+        clearTimeout(watchdog)
         busyRef.current = false
       }
     }
