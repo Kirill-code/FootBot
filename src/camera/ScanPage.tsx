@@ -1,12 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
 import { loadOpenCv, subscribeOpenCvState, type OpenCvLoadState } from '../analysis/opencvLoader'
 import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
+import CameraView, { type CameraShot } from './CameraView'
 
 // Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку), ПОТОМ анализ.
 // Третий ракурс (45°) убран: модель стопы строится по длине/ширине/подъёму.
 // OpenCV и модуль анализа грузятся динамически — в main-бандл не попадают.
+// Съёмка — живой видоискатель CameraView (NN-подсказки в реальном времени),
+// fallback — штатная камера / галерея.
 
 type Phase =
   | 'collect' // сбор фото (шаг 1/2 или 2/2)
@@ -15,9 +18,6 @@ type Phase =
   | 'saved' // модель сохранена
 
 type StepState = 'idle' | 'preview' // внутри collect
-
-const MAX_DIM_PX = 1600
-const MAX_BLOB_BYTES = 1024 * 1024 // 1 МБ
 
 interface StepInfo {
   view: FootView
@@ -51,33 +51,7 @@ interface Shot {
   canvas: HTMLCanvasElement
 }
 
-/**
- * Читает файл в ImageData + canvas, уменьшая до maxDim px.
- * EXIF-ориентация: телефонные фото почти всегда повёрнуты тегом 274.
- * createImageBitmap(blob, {imageOrientation:'from-image'}) поворачивает
- * пиксели по EXIF (Chrome/FF; при ошибке — откат на обычный bitmap,
- * тогда ориентацию применит декодер <img> при отрисовке на canvas).
- */
-async function fileToImageData(file: Blob, maxDim: number): Promise<{ imageData: ImageData; canvas: HTMLCanvasElement }> {
-  const scaleBitmap = async (): Promise<ImageBitmap> => {
-    try {
-      return await createImageBitmap(file, { imageOrientation: 'from-image' })
-    } catch {
-      return createImageBitmap(file)
-    }
-  }
-  const bmp = await scaleBitmap()
-  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height))
-  const w = Math.max(1, Math.round(bmp.width * scale))
-  const h = Math.max(1, Math.round(bmp.height * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')!
-  ctx.drawImage(bmp, 0, 0, w, h)
-  bmp.close()
-  return { imageData: ctx.getImageData(0, 0, w, h), canvas }
-}
+/** fileToImageData и canvasToBlob переехали в ./imageIO (общие с CameraView). */
 
 /** Превью с наложенным контуром стопы. */
 function drawPreview(canvas: HTMLCanvasElement, contour?: FootContourPoint[]): string {
@@ -95,23 +69,6 @@ function drawPreview(canvas: HTMLCanvasElement, contour?: FootContourPoint[]): s
     ctx.stroke()
   }
   return preview.toDataURL('image/jpeg', 0.85)
-}
-
-/** Сериализует canvas в Blob: webp q0.8, fallback jpeg; ≤ 1 МБ. */
-async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
-  const toBlob = (type: string, quality: number) =>
-    new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality))
-
-  let blob = await toBlob('image/webp', 0.8)
-  if (blob && blob.size <= MAX_BLOB_BYTES) return blob
-
-  for (const q of [0.8, 0.6, 0.4]) {
-    blob = await toBlob('image/jpeg', q)
-    if (blob && blob.size <= MAX_BLOB_BYTES) return blob
-  }
-  const last = await toBlob('image/jpeg', 0.4)
-  if (!last) throw new Error('Не удалось сохранить фото')
-  return last
 }
 
 /** Прогресс загрузки движка: реальные байты недоступны, показываем плавный ход. */
@@ -151,7 +108,6 @@ function failureHint(m: FootMeasurement | undefined, step: StepInfo): string | n
 }
 
 export default function ScanPage() {
-  const inputRef = useRef<HTMLInputElement>(null)
   const [foot, setFoot] = useState<FootSide>('left')
   const [step, setStep] = useState(0)
   const [phase, setPhase] = useState<Phase>('collect')
@@ -173,21 +129,26 @@ export default function ScanPage() {
 
   const stepInfo = STEPS[step]
 
-  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
+  /** Кадр с CameraView (или его fallback-галереи) уходит в общий пайплайн. */
+  const handleCapture = useCallback((shot: CameraShot) => {
     setErrorText('')
     try {
-      const { imageData, canvas } = await fileToImageData(file, MAX_DIM_PX)
-      const blob = await canvasToBlob(canvas)
-      const previewUrl = drawPreview(canvas)
-      setShots((prev) => ({ ...prev, [stepInfo.view]: { blob, previewUrl, imageData, canvas } }))
+      const previewUrl = drawPreview(shot.canvas)
+      setShots((prev) => ({
+        ...prev,
+        [stepInfoRef.current.view]: { blob: shot.blob, previewUrl, imageData: shot.imageData, canvas: shot.canvas }
+      }))
       setStepState('preview')
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : String(err))
     }
-  }
+  }, [])
+
+  /** Автоопределение стопы из CameraView применяем к выбранной стороне. */
+  const handleFootGuess = useCallback((side: FootSide) => setFoot(side), [])
+
+  const stepInfoRef = useRef(stepInfo)
+  stepInfoRef.current = stepInfo
 
   async function analyze() {
     setPhase('analyzing')
@@ -525,15 +486,6 @@ export default function ScanPage() {
         </button>
       </div>
 
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        style={{ display: 'none' }}
-        onChange={handleFile}
-      />
-
       {stepState === 'preview' && shots[stepInfo.view] ? (
         <>
           <div className="card" style={{ padding: 8 }}>
@@ -564,9 +516,12 @@ export default function ScanPage() {
         </>
       ) : (
         <>
-          <button className="btn btn-block" onClick={() => inputRef.current?.click()}>
-            Сфотографировать / выбрать фото
-          </button>
+          <CameraView
+            view={stepInfo.view}
+            foot={foot}
+            onFootGuess={handleFootGuess}
+            onCapture={handleCapture}
+          />
           {step === 1 && (
             <>
               <button className="btn btn-secondary btn-block" disabled={!shots.top || !shots.side} onClick={analyze}>
