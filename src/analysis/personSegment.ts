@@ -145,6 +145,107 @@ export function resetPersonSegmenter(): void {
   resetSegmenterSingleton()
 }
 
+// --- Worker-сегментация: wasm в отдельном потоке ---------------------------
+// segment() может зависнуть ВНУТРИ wasm навсегда. В главном потоке это
+// убивает весь UI (сторож setTimeout не отстреливается). В worker'е
+// зависший поток изолирован: сторож делает terminate, следующий кадр
+// пересоздаёт worker. Главно-поточный getPersonMask остаётся fallback.
+
+const SEG_TIMEOUT_MS = 20_000
+
+let segWorker: Worker | null = null
+let segWorkerFailed = false
+let nextSegId = 1
+
+interface SegPending {
+  resolve: (m: PersonMask | null) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const segPending = new Map<number, SegPending>()
+
+function destroySegWorker() {
+  segWorker?.terminate()
+  segWorker = null
+  for (const p of segPending.values()) {
+    clearTimeout(p.timer)
+    p.resolve(null) // кадр пропущен; следующий кадр пересоздаст worker
+  }
+  segPending.clear()
+}
+
+/** Watchdog: убить worker сегментации — следующий кадр пересоздаст. */
+export function resetSegmentWorker(): void {
+  destroySegWorker()
+  setState('idle')
+}
+
+function getSegWorker(): Worker | null {
+  if (segWorkerFailed) return null
+  if (!segWorker) {
+    try {
+      segWorker = new Worker(new URL('./segmentWorker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      segWorkerFailed = true
+      return null
+    }
+    segWorker.onmessage = (e: MessageEvent) => {
+      const msg = e.data as
+        | { type: 'state'; state: PersonSegmentState }
+        | { type: 'segment'; id: number; mask: Uint8Array | null; width: number; height: number }
+      if (msg.type === 'state') {
+        setState(msg.state)
+        return
+      }
+      const p = segPending.get(msg.id)
+      if (!p) return
+      segPending.delete(msg.id)
+      clearTimeout(p.timer)
+      p.resolve(msg.mask ? { mask: msg.mask, width: msg.width, height: msg.height } : null)
+    }
+    segWorker.onerror = () => {
+      segWorkerFailed = true
+      destroySegWorker()
+      setState('error')
+    }
+    segWorker.onmessageerror = () => {
+      segWorkerFailed = true
+      destroySegWorker()
+      setState('error')
+    }
+  }
+  return segWorker
+}
+
+/**
+ * Сегментация в Web Worker (предпочтительно) с откатом на главный поток.
+ * Пиксели копируются и передаются transfer'ом — исходный imageData не
+ * отсоединяется (вызывающий код использует его дальше, напр. paper-фильтр).
+ */
+export async function getPersonMaskAsync(imageData: ImageData): Promise<PersonMask | null> {
+  const w = getSegWorker()
+  if (!w) return getPersonMask(imageData) // fallback: главный поток
+  return new Promise<PersonMask | null>((resolve) => {
+    const id = nextSegId++
+    const copy = imageData.data.slice()
+    const timer = setTimeout(() => {
+      segPending.delete(id)
+      resetSegmentWorker()
+      resolve(null)
+    }, SEG_TIMEOUT_MS)
+    segPending.set(id, { resolve, timer })
+    try {
+      w.postMessage(
+        { type: 'segment', id, imageData: { width: imageData.width, height: imageData.height, data: copy } },
+        [copy.buffer as ArrayBuffer]
+      )
+    } catch {
+      segPending.delete(id)
+      clearTimeout(timer)
+      resolve(null)
+    }
+  })
+}
+
 // Переиспользуемый canvas — не плодим DOM-элемент на каждый кадр.
 let frameCanvas: HTMLCanvasElement | null = null
 

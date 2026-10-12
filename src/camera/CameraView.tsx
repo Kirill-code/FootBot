@@ -9,9 +9,8 @@ import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import type { FootView } from '../analysis/measureFoot'
 import type { FootSide } from '../profile/db'
 import {
-  getPersonMask,
-  loadPersonSegmenter,
-  resetPersonSegmenter,
+  getPersonMaskAsync,
+  resetSegmentWorker,
   subscribePersonSegmentState,
   type PersonSegmentState
 } from '../analysis/personSegment'
@@ -306,11 +305,9 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, camAttempt])
 
-  // Подгружаем сегментатор сразу — к моменту стабилизации видео он готов.
+  // Подписка на состояние сегментатора: статусы приходят и из worker'а
+  // (live-цикл) и из главно-поточного fallback (финальный анализ).
   useEffect(() => subscribePersonSegmentState(setNnState), [])
-  useEffect(() => {
-    loadPersonSegmenter().catch(() => undefined)
-  }, [])
 
   // Сглаживание канонического силуэта между кадрами (вне эффекта цикла).
   const canonRef = useRef<{ t: CanonicalTransform; lastSeen: number } | null>(null)
@@ -332,16 +329,16 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       const video = videoRef.current
       if (!video || !video.videoWidth) return
       busyRef.current = true
-      // Watchdog: segment() может зависнуть ВНУТРИ wasm без исключения, а
-      // fetch модели — без таймаута: await тогда никогда не разрешится и
-      // цикл мёртв без единой ошибки. 15 с с запасом — штатный кадр <3 с.
+      // Watchdog: segment() может зависнуть ВНУТРИ wasm без исключения.
+      // Сегментация — в worker'е (главный поток свободен), поэтому сторож
+      // отстреливается даже при мёртвом wasm: terminate + пересоздание.
       const watchdog = setTimeout(() => {
         if (stopped) return
         busyRef.current = false
         // Не оставляем застывшую обводку: чистим оверлей, статус «загрузка».
         drawOverlay(null, 'loading')
         setStatus('loading')
-        void resetPersonSegmenter()
+        resetSegmentWorker()
       }, WATCHDOG_MS)
       try {
         const scale = Math.min(1, ANALYSIS_DIM / Math.max(video.videoWidth, video.videoHeight))
@@ -373,7 +370,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         cropCtx.drawImage(frameCanvas, cx0, cy0, cw, ch, 0, 0, crw, crh)
         const cropData = cropCtx.getImageData(0, 0, crw, crh)
 
-        const personMask = await getPersonMask(cropData)
+        const personMask = await getPersonMaskAsync(cropData)
         if (stopped) return
         if (!personMask) {
           setStatus(nnState === 'error' ? 'error' : 'loading')
