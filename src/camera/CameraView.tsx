@@ -22,6 +22,7 @@ const ANALYSIS_DIM = 640 // длинная сторона кадра для се
 const CAPTURE_DIM = 1600
 const LOOP_MS = 350
 const MIN_FOOT_FRACTION = 0.004 // <0.4% кадра — стопа не найдена
+const OPEN_TIMEOUT_MS = 8000 // таймаут открытия камеры (Android-фриз getUserMedia)
 
 export interface CameraShot {
   blob: Blob
@@ -36,6 +37,8 @@ interface CameraViewProps {
   foot?: FootSide
   /** Применить автоопределённую сторону стопы. */
   onFootGuess?: (side: FootSide) => void
+  /** false — поставить камеру на паузу (остановка tracks и цикла) без размонтирования. */
+  active?: boolean
 }
 
 type CameraState = 'starting' | 'live' | 'denied'
@@ -235,7 +238,7 @@ function drawHeader(ctx: CanvasRenderingContext2D, cw: number, view: FootView) {
   ctx.restore()
 }
 
-export default function CameraView({ view, onCapture, foot, onFootGuess }: CameraViewProps) {
+export default function CameraView({ view, onCapture, foot, onFootGuess, active = true }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -243,52 +246,116 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
   const [cameraState, setCameraState] = useState<CameraState>('starting')
   const [videoAspect, setVideoAspect] = useState(4 / 3)
   const [camError, setCamError] = useState('')
+  const [camAttempt, setCamAttempt] = useState(0) // инкремент = повторный запуск
   const [nnState, setNnState] = useState<PersonSegmentState>('idle')
   const [status, setStatus] = useState<FrameStatus>('loading')
   const [laterality, setLaterality] = useState<{ side: FootSide; confidence: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const galleryRef = useRef<HTMLInputElement>(null)
+  // Пропы в refs — чтобы эффект анализа не пересоздавался на рендерах родителя.
+  const footRef = useRef(foot)
+  footRef.current = foot
+  const onFootGuessRef = useRef(onFootGuess)
+  onFootGuessRef.current = onFootGuess
 
-  // Запуск камеры.
+  const stopStream = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+  }
+
+  // Гарантированный stop при размонтировании (даже если эффект запуска мёртв).
+  useEffect(() => stopStream, [])
+
+  // Запуск камеры: таймаут 8 с → abort → ОДИН повтор с минимальными
+  // constraints. Вторая ошибка/таймаут → denied + кнопка «Повторить».
   useEffect(() => {
-    let cancelled = false
-    const stream = navigator.mediaDevices?.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false
-    })
-    if (!stream) {
+    if (!active) return
+    const gm = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices)
+    if (!gm) {
+      setCamError('getUserMedia не поддерживается')
       setCameraState('denied')
       return
     }
-    stream
-      .then((s) => {
-        if (cancelled) {
-          s.getTracks().forEach((t) => t.stop())
+    let cancelled = false
+    stopStream()
+    setCameraState('starting')
+
+    const openCamera = (constraints: MediaStreamConstraints, timeoutMs: number): Promise<MediaStream> =>
+      new Promise((resolve, reject) => {
+        let settled = false
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => {
+          settled = true
+          ctrl.abort() // Chrome с signal отпускает запрос/индикатор камеры
+          reject(new DOMException('Timeout открытия камеры', 'TimeoutError'))
+        }, timeoutMs)
+        gm({ ...constraints, signal: ctrl.signal } as MediaStreamConstraints)
+          .then((s) => {
+            if (settled) {
+              // Камера открылась после таймаута — поток не нужен.
+              s.getTracks().forEach((t) => t.stop())
+              return
+            }
+            settled = true
+            clearTimeout(timer)
+            resolve(s)
+          })
+          .catch((e: unknown) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            reject(e)
+          })
+      })
+
+    const FULL: MediaStreamConstraints = {
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    }
+    const MINIMAL: MediaStreamConstraints = { video: { facingMode: 'environment' }, audio: false }
+
+    ;(async () => {
+      let s: MediaStream
+      try {
+        s = await openCamera(FULL, OPEN_TIMEOUT_MS)
+      } catch {
+        if (cancelled) return
+        try {
+          s = await openCamera(MINIMAL, OPEN_TIMEOUT_MS)
+        } catch (e) {
+          if (cancelled) return
+          setCamError(e instanceof Error ? e.message : String(e))
+          setCameraState('denied')
           return
         }
-        streamRef.current = s
-        const v = videoRef.current
-        if (v) {
-          v.srcObject = s
-          v.onloadedmetadata = () => {
-            // Аспект контейнера = аспект потока, иначе objectFit cover
-            // кадрирует кадр и оверлей разъедется.
-            if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight)
-          }
-          v.play().catch(() => setCameraState('denied'))
+      }
+      if (cancelled) {
+        s.getTracks().forEach((t) => t.stop())
+        return
+      }
+      streamRef.current = s
+      const v = videoRef.current
+      if (v) {
+        v.srcObject = s
+        v.onloadedmetadata = () => {
+          // Аспект контейнера = аспект потока, иначе objectFit cover
+          // кадрирует кадр и оверлей разъедется.
+          if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight)
+          v.play().catch(() => undefined)
         }
-        setCameraState('live')
-      })
-      .catch((e: unknown) => {
-        setCamError(e instanceof Error ? e.message : String(e))
-        setCameraState('denied')
-      })
+        // Часть Android не стартует воспроизведение с первого раза.
+        v.onloadeddata = () => v.play().catch(() => undefined)
+        v.play().catch(() => undefined)
+      }
+      setCameraState('live')
+    })()
+
     return () => {
       cancelled = true
-      streamRef.current?.getTracks().forEach((t) => t.stop())
-      streamRef.current = null
+      stopStream()
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, camAttempt])
 
   // Подгружаем сегментатор сразу — к моменту стабилизации видео он готов.
   useEffect(() => subscribePersonSegmentState(setNnState), [])
@@ -298,7 +365,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
 
   // Цикл анализа.
   useEffect(() => {
-    if (cameraState !== 'live') return
+    if (!active || cameraState !== 'live') return
     let stopped = false
     const frameCanvas = document.createElement('canvas')
     const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true })!
@@ -339,7 +406,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
           const guess = detectLaterality(contour, true)
           if (guess && guess.confidence >= 0.55) {
             setLaterality({ side: guess.side, confidence: guess.confidence })
-            if (foot && guess.side !== foot) onFootGuess?.(guess.side)
+            if (footRef.current && guess.side !== footRef.current) onFootGuessRef.current?.(guess.side)
           } else if (!guess) {
             setLaterality(null)
           }
@@ -425,7 +492,8 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
       stopped = true
       clearInterval(timer)
     }
-  }, [cameraState, view, nnState, foot, onFootGuess])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, cameraState, view, nnState])
 
   async function capture() {
     const video = videoRef.current
@@ -457,6 +525,15 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
           Живая камера недоступна{camError ? ` (${camError})` : ''}. Снимите фото штатной камерой
           или выберите из галереи — анализ тот же.
         </p>
+        <button
+          className="btn btn-block"
+          onClick={() => {
+            setCamError('')
+            setCamAttempt((n) => n + 1)
+          }}
+        >
+          Повторить запуск камеры
+        </button>
         <input
           ref={fileRef}
           type="file"
@@ -512,6 +589,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
           ref={videoRef}
           playsInline
           muted
+          autoPlay
           style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
         />
         <canvas
@@ -529,6 +607,20 @@ export default function CameraView({ view, onCapture, foot, onFootGuess }: Camer
             }}
           >
             Запуск камеры…
+          </div>
+        )}
+        {!active && cameraState === 'live' && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'grid',
+              placeItems: 'center',
+              color: 'var(--text-dim)',
+              background: 'rgba(0,0,0,0.5)'
+            }}
+          >
+            Камера на паузе
           </div>
         )}
       </div>

@@ -522,6 +522,7 @@ export default function ScanPage() {
             foot={foot}
             onFootGuess={handleFootGuess}
             onCapture={handleCapture}
+            active={phase === 'collect'}
           />
           {step === 1 && (
             <>
