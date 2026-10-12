@@ -1503,22 +1503,6 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       sockDetected: false
     }
 
-    // Носок: NN-маска покрывает ногу классом «одежда», а кожи в нижней части нет.
-    const pm = options?.personMask
-    if (pm && pm.mask.length >= pm.width * pm.height) {
-      const third = Math.floor(pm.height / 3)
-      let skin = 0
-      let clothes = 0
-      for (let y = pm.height - third; y < pm.height; y++) {
-        for (let x = 0; x < pm.width; x++) {
-          const v = pm.mask[y * pm.width + x]
-          if (v === 2 || v === 3) skin++
-          else if (v === 4) clothes++
-        }
-      }
-      if (skin === 0 && clothes > 200) empty.sockDetected = true
-    }
-
     // Арбитраж NN vs классика: NN — основной источник, но при большом
     // расхождении длин (и правдоподобной классике) доверяем проверенной
     // классике — NN-силуэт почти всегда включает голень.
@@ -1544,6 +1528,46 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       } else {
         debug?.onInfo?.('arbitration', { nnMm: Math.round(nnMm), clMm: Math.round(clMm), picked: 'nn' })
         foot = nnCandidate
+      }
+    }
+
+    // Носок: считаем по ВЫБРАННОЙ компоненте стопы, а не по нижней трети
+    // всей маски — иначе джинсы (класс 4) ниже стопы дают ложное
+    // срабатывание на босой ноге. Носок = внутри компоненты мало кожи
+    // (2|3) и одежда (4) доминирует; босая стопа/голень дают много кожи.
+    const pm = options?.personMask
+    if (pm && pm.mask.length >= pm.width * pm.height && foot && pm.width === src.cols && pm.height === src.rows) {
+      const box = cv.boundingRect(foot.contour)
+      const compRoi = t.track(foot.mask.roi(new cv.Rect(box.x, box.y, box.width, box.height)))
+      const total = cv.countNonZero(compRoi)
+      if (total >= 500) {
+        // Маски классов строим только внутри bbox. ucharPtr-скаляр на
+        // каждый пиксель — медленно; математика в cv + JS-сбор массива.
+        const mkClass = (pred: (v: number) => boolean) => {
+          const arr = new Uint8Array(box.width * box.height)
+          for (let y = 0; y < box.height; y++) {
+            const off = (box.y + y) * pm.width + box.x
+            const ro = y * box.width
+            for (let x = 0; x < box.width; x++) if (pred(pm.mask[off + x])) arr[ro + x] = 255
+          }
+          return t.track(cv.matFromArray(box.height, box.width, cv.CV_8UC1, Array.from(arr)))
+        }
+        const skinM = mkClass((v) => v === 2 || v === 3)
+        const clothesM = mkClass((v) => v === 4)
+        const andM = t.track(new cv.Mat())
+        cv.bitwise_and(compRoi, skinM, andM)
+        const skin = cv.countNonZero(andM)
+        cv.bitwise_and(compRoi, clothesM, andM)
+        const clothes = cv.countNonZero(andM)
+        debug?.onInfo?.('sock', { total, skin, clothes })
+        // Основной порог: одежда доминирует. Доп. ветка: кожи нет совсем,
+        // а одежда заметна — NN часто маркирует тёмный носок как «фон», тогда
+        // доля 4 ниже основного порога, но носок всё равно очевиден.
+        const skinFrac = skin / total
+        const clothesFrac = clothes / total
+        if (skinFrac < 0.15 && (clothesFrac >= 0.4 || (skin === 0 && clothesFrac >= 0.15))) {
+          empty.sockDetected = true
+        }
       }
     }
 

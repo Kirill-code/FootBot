@@ -1,22 +1,19 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
 import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
-import CameraView, { type CameraShot } from './CameraView'
+import FullScanScreen, { type ScanShots } from './FullScanScreen'
 
-// Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку), ПОТОМ анализ.
+// Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку) в
+// полноэкранном режиме (FullScanScreen), ПОТОМ анализ в Web Worker.
 // Третий ракурс (45°) убран: модель стопы строится по длине/ширине/подъёму.
 // OpenCV и модуль анализа грузятся динамически — в main-бандл не попадают.
-// Съёмка — живой видоискатель CameraView (NN-подсказки в реальном времени),
-// fallback — штатная камера / галерея.
 
 type Phase =
-  | 'collect' // сбор фото (шаг 1/2 или 2/2)
+  | 'collect' // стартовый экран + полноэкранный сбор
   | 'analyzing' // единый экран анализа
   | 'results' // результаты по ракурсам
   | 'saved' // модель сохранена
-
-type StepState = 'idle' | 'preview' // внутри collect
 
 interface StepInfo {
   view: FootView
@@ -85,11 +82,9 @@ function failureHint(m: FootMeasurement | undefined, step: StepInfo): string | n
 
 export default function ScanPage() {
   const [foot, setFoot] = useState<FootSide>('left')
-  const [step, setStep] = useState(0)
   const [phase, setPhase] = useState<Phase>('collect')
-  const [stepState, setStepState] = useState<StepState>('idle')
+  const [scanOpen, setScanOpen] = useState(false)
   const [analyzingView, setAnalyzingView] = useState<string>('')
-  const [sockWarn, setSockWarn] = useState(false)
   const [shots, setShots] = useState<Partial<Record<FootView, Shot>>>({})
   const [analysis, setAnalysis] = useState<Partial<Record<FootView, FootMeasurement>>>({})
   const [previews, setPreviews] = useState<Partial<Record<FootView, string>>>({})
@@ -99,33 +94,21 @@ export default function ScanPage() {
   const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
 
-  const stepInfo = STEPS[step]
-
-  /** Кадр с CameraView (или его fallback-галереи) уходит в общий пайплайн. */
-  const handleCapture = useCallback((shot: CameraShot) => {
-    setErrorText('')
-    try {
-      const previewUrl = drawPreview(shot.canvas)
-      setShots((prev) => ({
-        ...prev,
-        [stepInfoRef.current.view]: { blob: shot.blob, previewUrl, imageData: shot.imageData, canvas: shot.canvas }
-      }))
-      setStepState('preview')
-    } catch (err) {
-      setErrorText(err instanceof Error ? err.message : String(err))
+  /** Полный цикл FullScanScreen завершён — оборачиваем в Shot и уходим в анализ. */
+  const handleScanComplete = useCallback((raw: ScanShots) => {
+    const full: Partial<Record<FootView, Shot>> = {
+      top: { ...raw.top, previewUrl: drawPreview(raw.top.canvas) },
+      side: { ...raw.side, previewUrl: drawPreview(raw.side.canvas) }
     }
+    setShots(full)
+    setScanOpen(false)
+    void analyze(full)
   }, [])
 
-  /** Автоопределение стопы из CameraView применяем к выбранной стороне. */
-  const handleFootGuess = useCallback((side: FootSide) => setFoot(side), [])
-
-  const stepInfoRef = useRef(stepInfo)
-  stepInfoRef.current = stepInfo
-
-  async function analyze() {
+  async function analyze(shotsOverride?: Partial<Record<FootView, Shot>>) {
+    const sh = shotsOverride ?? shots
     setPhase('analyzing')
     setErrorText('')
-    setSockWarn(false)
     // Смена подписи + пауза, чтобы UI успел отрисоваться перед тяжёлым шагом.
     const phase = async (label: string) => {
       setAnalyzingView(label)
@@ -144,27 +127,23 @@ export default function ScanPage() {
       const { measureFootAsync } = await import('../analysis/measureFootClient')
       const results: Partial<Record<FootView, FootMeasurement>> = {}
       const pv: Partial<Record<FootView, string>> = {}
-      let sock = false
       // 2. Анализ top — в Web Worker: UI живой, OpenCV не блокирует поток.
-      if (shots.top) {
+      if (sh.top) {
         await phase('Анализируем фото 1/2 (сверху)…')
-        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(shots.top.imageData) : null
-        const m = await measureFootAsync(shots.top.imageData, 'top', personMask)
-        sock = sock || m.sockDetected
+        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData) : null
+        const m = await measureFootAsync(sh.top.imageData, 'top', personMask)
         results.top = m
-        pv.top = drawPreview(shots.top.canvas, m.footContour)
+        pv.top = drawPreview(sh.top.canvas, m.footContour)
       }
       // 3. Анализ side.
-      if (shots.side) {
+      if (sh.side) {
         await phase('Анализируем фото 2/2 (сбоку)…')
-        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(shots.side.imageData) : null
-        const m = await measureFootAsync(shots.side.imageData, 'side', personMask)
-        sock = sock || m.sockDetected
+        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData) : null
+        const m = await measureFootAsync(sh.side.imageData, 'side', personMask)
         results.side = m
-        pv.side = drawPreview(shots.side.canvas, m.footContour)
+        pv.side = drawPreview(sh.side.canvas, m.footContour)
       }
       await phase('Строим модель стопы…')
-      setSockWarn(sock)
       setAnalysis(results)
       setPreviews(pv)
       setPhase('results')
@@ -175,14 +154,11 @@ export default function ScanPage() {
   }
 
   function retake(view: FootView) {
-    const idx = STEPS.findIndex((s) => s.view === view)
-    setStep(idx)
     setShots((prev) => {
       const next = { ...prev }
       delete next[view]
       return next
     })
-    setStepState('idle')
     setPhase('collect')
   }
 
@@ -272,7 +248,7 @@ export default function ScanPage() {
             <p className="hint" style={{ color: '#ff7a7a' }}>Замеры ракурсов заметно различаются — рекомендуем переснять.</p>
           )}
         </div>
-        <button className="btn btn-block" onClick={() => { setPhase('collect'); setStep(0); setStepState('idle'); setShots({}); setAnalysis({}); setPreviews({}); setModel(null) }}>
+        <button className="btn btn-block" onClick={() => { setPhase('collect'); setShots({}); setAnalysis({}); setPreviews({}); setModel(null) }}>
           Новое сканирование
         </button>
       </main>
@@ -329,8 +305,7 @@ export default function ScanPage() {
         {(analysis.top?.sockDetected || analysis.side?.sockDetected) && (
           <div className="card">
             <p className="hint" style={{ color: '#e8c547' }}>
-              Похоже, на стопе носок — для точного подбора кроссовок снимите носки
-              и переснимите.
+              Похоже, на стопе носок — для точного подбора снимите носки и переснимите.
             </p>
           </div>
         )}
@@ -341,19 +316,10 @@ export default function ScanPage() {
           </div>
         )}
 
-        {sockWarn && (
-          <div className="card">
-            <p className="hint" style={{ color: '#e8c547' }}>
-              Похоже, на стопе носок — для точного подбора снимите носки и
-              переснимите ракурс сверху.
-            </p>
-          </div>
-        )}
-
         {anyMeasured && (
           <button className="btn btn-block" onClick={saveModel}>Сохранить модель стопы</button>
         )}
-        <button className="btn btn-secondary btn-block" onClick={() => { setPhase('collect'); setStep(1); setStepState(shots.side ? 'preview' : 'idle') }}>
+        <button className="btn btn-secondary btn-block" onClick={() => setPhase('collect')}>
           Назад к фото
         </button>
         {!manualOpen ? (
@@ -390,49 +356,24 @@ export default function ScanPage() {
     )
   }
 
-  // phase === 'collect'
+  // phase === 'collect' — стартовый экран; съёмка — в полноэкранном режиме.
   return (
     <main className="page">
       <h1 className="page-title">Скан стопы</h1>
-      <p className="page-subtitle">Два фото, затем анализ</p>
+      <p className="page-subtitle">Полноэкранная съёмка: два ракурса, затем анализ</p>
 
-      <div className="card" style={{ display: 'flex', gap: 8 }}>
-        {STEPS.map((s, i) => (
-          <div
-            key={s.view}
-            className="btn btn-secondary btn-block"
-            style={{
-              padding: '8px 4px',
-              fontSize: 13,
-              borderColor: i === step ? 'var(--accent)' : 'var(--border)',
-              color: i === step ? 'var(--accent)' : shots[s.view] ? 'var(--accent)' : undefined,
-              opacity: i <= step || shots[s.view] ? 1 : 0.5
-            }}
-          >
-            {shots[s.view] ? '✓ ' : ''}{i + 1}
-          </div>
-        ))}
-      </div>
-
-      <div className="card">
-        <p style={{ margin: '0 0 6px', fontWeight: 600 }}>{stepInfo.title}</p>
-        <p className="hint">{stepInfo.why}</p>
-        <p className="hint" style={{ marginTop: 6, color: 'var(--accent)' }}>
-          ⚠️ Ступни должны быть босиком, без носков — носок добавляет миллиметры и искажает подбор размера.
+      <div className="card" style={{ display: 'grid', gap: 6 }}>
+        <p className="hint">
+          <strong>Шаг 1/2 — сверху:</strong> вся стопа в кадре, пальцы от вас. Рядом положите
+          банковскую карту в углу рамки (или лист А4, если камера высоко) — по ней считаем масштаб.
         </p>
-        {stepInfo.view === 'top' && (
-          <p className="hint" style={{ marginTop: 6 }}>
-            Рядом со стопой положите банковскую карту в углу рамки (или лист А4,
-            если камера высоко) — целиком в кадр, на одном полу со стопой.
-            Снимайте при хорошем свете.
-          </p>
-        )}
-        {stepInfo.view === 'side' && (
-          <p className="hint" style={{ marginTop: 6 }}>
-            Лист не нужен — только стопа сбоку на фоне пола. Камера на уровне пола,
-            видны и пятка, и носок.
-          </p>
-        )}
+        <p className="hint">
+          <strong>Шаг 2/2 — сбоку:</strong> камера у уровня пола, видны и пятка, и носок.
+          Лист не нужен.
+        </p>
+        <p className="hint" style={{ color: 'var(--accent)' }}>
+          ⚠️ Ступни босиком, без носков — носок добавляет миллиметры и искажает подбор размера.
+        </p>
       </div>
 
       <div className="card" style={{ display: 'flex', gap: 8 }}>
@@ -452,60 +393,29 @@ export default function ScanPage() {
         </button>
       </div>
 
-      {stepState === 'preview' && shots[stepInfo.view] ? (
-        <>
-          <div className="card" style={{ padding: 8 }}>
-            <img src={shots[stepInfo.view]!.previewUrl} alt={stepInfo.title} style={{ width: '100%', borderRadius: 10 }} />
-          </div>
-          <button className="btn btn-block" onClick={() => setStepState('idle')}>
-            Переснять
-          </button>
-          {step === 0 ? (
-            <>
-              <button className="btn btn-block" onClick={() => { setStep(1); setStepState(shots.side ? 'preview' : 'idle') }}>
-                Далее
-              </button>
-              <button className="btn btn-secondary btn-block" disabled={!shots.side} onClick={analyze}>
-                Перейти к анализу
-              </button>
-            </>
-          ) : (
-            <button className="btn btn-block" onClick={analyze}>
-              Анализировать
-            </button>
-          )}
-          {step === 1 && (
-            <button className="btn btn-secondary btn-block" onClick={() => { setStep(0); setStepState(shots.top ? 'preview' : 'idle') }}>
-              Назад
-            </button>
-          )}
-        </>
-      ) : (
-        <>
-          <CameraView
-            view={stepInfo.view}
-            foot={foot}
-            onFootGuess={handleFootGuess}
-            onCapture={handleCapture}
-            active={phase === 'collect'}
-          />
-          {step === 1 && (
-            <>
-              <button className="btn btn-secondary btn-block" disabled={!shots.top || !shots.side} onClick={analyze}>
-                Анализировать
-              </button>
-              <button className="btn btn-secondary btn-block" onClick={() => { setStep(0); setStepState(shots.top ? 'preview' : 'idle') }}>
-                Назад
-              </button>
-            </>
-          )}
-        </>
+      <button className="btn btn-block" onClick={() => setScanOpen(true)}>
+        Начать сканирование
+      </button>
+
+      {shots.top && shots.side && (
+        <button className="btn btn-secondary btn-block" onClick={() => analyze()}>
+          Анализировать готовые фото
+        </button>
       )}
 
       {errorText && (
         <div className="card">
           <p className="hint" style={{ color: '#ff7a7a' }}>{errorText}</p>
         </div>
+      )}
+
+      {scanOpen && (
+        <FullScanScreen
+          foot={foot}
+          onFootChange={setFoot}
+          onClose={() => setScanOpen(false)}
+          onComplete={handleScanComplete}
+        />
       )}
     </main>
   )

@@ -5,7 +5,7 @@
 // используется — только при финальном анализе в ScanPage.
 // Fallback: недоступный/запрещённый getUserMedia → старый input capture.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import type { FootView } from '../analysis/measureFoot'
 import type { FootSide } from '../profile/db'
 import {
@@ -39,6 +39,10 @@ interface CameraViewProps {
   onFootGuess?: (side: FootSide) => void
   /** false — поставить камеру на паузу (остановка tracks и цикла) без размонтирования. */
   active?: boolean
+  /** false — скрыть штатные подписи и кнопки (кастомный chrome родителя, напр. полноэкранный скан). */
+  chrome?: boolean
+  /** Наружный доступ к спуску/галерее для кастомной кнопки спуска. */
+  actionsRef?: MutableRefObject<{ capture: () => void; openGallery: () => void } | null>
 }
 
 type CameraState = 'starting' | 'live' | 'denied'
@@ -238,7 +242,7 @@ function drawHeader(ctx: CanvasRenderingContext2D, cw: number, view: FootView) {
   ctx.restore()
 }
 
-export default function CameraView({ view, onCapture, foot, onFootGuess, active = true }: CameraViewProps) {
+export default function CameraView({ view, onCapture, foot, onFootGuess, active = true, chrome = true, actionsRef }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -257,6 +261,8 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   footRef.current = foot
   const onFootGuessRef = useRef(onFootGuess)
   onFootGuessRef.current = onFootGuess
+  const chromeRef = useRef(chrome)
+  chromeRef.current = chrome
 
   const stopStream = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -482,8 +488,8 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       // Зона банковской карты (только top, статичный placeholder).
       if (view === 'top') drawCardGhost(ctx, g, oppositeCorner(contour, cw, ch))
 
-      // Текстовая шапка поверх всего.
-      drawHeader(ctx, cw, view)
+      // Текстовая шапка поверх всего (в кастомном chrome рисует родитель).
+      if (chromeRef.current) drawHeader(ctx, cw, view)
     }
 
     const timer = setInterval(() => void analyze(), LOOP_MS)
@@ -516,6 +522,18 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     const blob = await canvasToBlob(canvas)
     onCapture({ blob, imageData, canvas })
   }
+
+  // Внешний доступ к спуску/галерее (кастомная кнопка спуска родителя).
+  useEffect(() => {
+    if (!actionsRef) return
+    actionsRef.current = {
+      capture: () => void capture(),
+      openGallery: () => galleryRef.current?.click()
+    }
+    return () => {
+      actionsRef.current = null
+    }
+  })
 
   // Fallback: камера недоступна/запрещена — старый input capture.
   if (cameraState === 'denied') {
@@ -625,23 +643,27 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         )}
       </div>
 
-      <p className="hint" style={{ margin: 0, color, textAlign: 'center', minHeight: '1.2em' }}>
-        {hintText}
-      </p>
+      {chrome && (
+        <>
+          <p className="hint" style={{ margin: 0, color, textAlign: 'center', minHeight: '1.2em' }}>
+            {hintText}
+          </p>
 
-      {view === 'top' && laterality && (
-        <p className="hint" style={{ margin: 0, textAlign: 'center' }}>
-          Похоже: <strong>{laterality.side === 'left' ? 'левая' : 'правая'}</strong> стопа (
-          {Math.round(laterality.confidence * 100)}%) — подтвердите кнопками Л / П ниже
-        </p>
+          {view === 'top' && laterality && (
+            <p className="hint" style={{ margin: 0, textAlign: 'center' }}>
+              Похоже: <strong>{laterality.side === 'left' ? 'левая' : 'правая'}</strong> стопа (
+              {Math.round(laterality.confidence * 100)}%) — подтвердите кнопками Л / П ниже
+            </p>
+          )}
+
+          <button className="btn btn-block" disabled={cameraState !== 'live'} onClick={() => void capture()}>
+            Снимать
+          </button>
+          <button className="btn btn-secondary btn-block" onClick={() => galleryRef.current?.click()}>
+            Выбрать из галереи
+          </button>
+        </>
       )}
-
-      <button className="btn btn-block" disabled={cameraState !== 'live'} onClick={() => void capture()}>
-        Снимать
-      </button>
-      <button className="btn btn-secondary btn-block" onClick={() => galleryRef.current?.click()}>
-        Выбрать из галереи
-      </button>
       <input
         ref={galleryRef}
         type="file"
