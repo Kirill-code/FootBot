@@ -16,7 +16,18 @@ import {
   type PersonSegmentState
 } from '../analysis/personSegment'
 import { detectLaterality } from '../analysis/footLaterality'
-import { maskToContour, personBinFromCategories } from './liveContour'
+import { largestComponent, maskToContour, personBinFromCategories } from './liveContour'
+import {
+  canonForView,
+  deltaMask,
+  filterPaperComponents,
+  fitCanonical,
+  lerpTransform,
+  transformCanon,
+  type CanonPoint,
+  type CanonicalTransform,
+  type DeltaGrid
+} from './canonicalFoot'
 import { canvasToBlob, fileToImageData } from './imageIO'
 
 const ANALYSIS_DIM = 640 // длинная сторона кадра для сегментации
@@ -101,6 +112,18 @@ const GHOST_TEXT = 'rgba(255, 255, 255, 0.6)'
 
 type Corner = 'tl' | 'tr' | 'bl' | 'br'
 
+/** Доп. слои оверлея: канонический силуэт + дельта реальной маски. */
+interface OverlayExtras {
+  /** Канон в координатах маски (уже трансформирован). */
+  canon: CanonPoint[] | null
+  /** Качество фита 0..1 (цвет канона). */
+  quality: number
+  /** Возраст последнего удачного фита, мс (fade out). */
+  age: number
+  /** Дельта-зоны: маска за пределами канона. */
+  delta: DeltaGrid | null
+}
+
 /** Угол рамки, противоположный центру масс маски (по умолчанию — правый нижний). */
 function oppositeCorner(contour: { x: number; y: number }[] | null, cw: number, ch: number): Corner {
   if (!contour || contour.length === 0) return 'br'
@@ -113,87 +136,6 @@ function oppositeCorner(contour: { x: number; y: number }[] | null, cw: number, 
   const cx = sx / contour.length
   const cy = sy / contour.length
   return ((cy < ch / 2 ? 'b' : 't') + (cx < cw / 2 ? 'r' : 'l')) as Corner
-}
-
-/** Пунктирный «призрачный» силуэт стопы анфас + стрелка «пальцы от вас». */
-function drawTopGhost(ctx: CanvasRenderingContext2D, g: GuideRect) {
-  const cx = g.x + g.w / 2
-  const fh = g.h * 0.78
-  const fw = Math.min(g.w * 0.32, fh * 0.42)
-  const gy = g.y + (g.h - fh) / 2
-  ctx.save()
-  ctx.strokeStyle = GHOST_STROKE
-  ctx.lineWidth = 1.5
-  ctx.setLineDash([5, 5])
-  // Пятка.
-  ctx.beginPath()
-  ctx.ellipse(cx, gy + fh * 0.8, fw * 0.44, fh * 0.18, 0, 0, Math.PI * 2)
-  ctx.stroke()
-  // Тело стопы.
-  ctx.beginPath()
-  ctx.ellipse(cx, gy + fh * 0.45, fw * 0.5, fh * 0.32, 0, 0, Math.PI * 2)
-  ctx.stroke()
-  // Пять пальцев — округлые дугой, большой в центре.
-  const toeY = gy + fh * 0.1
-  const radii = [0.17, 0.14, 0.12, 0.1, 0.085]
-  for (let i = 0; i < 5; i++) {
-    const t = (i - 2) / 2
-    ctx.beginPath()
-    ctx.arc(cx + t * fw * 0.42, toeY + Math.abs(t) * fh * 0.05, fw * radii[i], 0, Math.PI * 2)
-    ctx.stroke()
-  }
-  ctx.setLineDash([])
-  // Стрелка вверх + подпись «пальцы от вас».
-  const ay0 = gy - fh * 0.06
-  const ay1 = g.y + g.h * 0.015
-  ctx.strokeStyle = GHOST_TEXT
-  ctx.fillStyle = GHOST_TEXT
-  ctx.lineWidth = 2
-  ctx.beginPath()
-  ctx.moveTo(cx, ay0)
-  ctx.lineTo(cx, Math.max(ay1, ay0 - fh * 0.12))
-  ctx.stroke()
-  const ahY = Math.max(ay1, ay0 - fh * 0.12)
-  ctx.beginPath()
-  ctx.moveTo(cx - 5, ahY + 7)
-  ctx.lineTo(cx, ahY)
-  ctx.lineTo(cx + 5, ahY + 7)
-  ctx.closePath()
-  ctx.fill()
-  ctx.font = `${Math.max(10, Math.round(g.w / 30))}px system-ui, sans-serif`
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'middle'
-  ctx.fillText('пальцы от вас', cx + 10, (ay0 + ahY) / 2)
-  ctx.restore()
-}
-
-/** Пунктирный «призрачный» силуэт стопы профилем (пятка слева, носок справа). */
-function drawSideGhost(ctx: CanvasRenderingContext2D, g: GuideRect) {
-  const x0 = g.x + g.w * 0.18
-  const x1 = g.x + g.w * 0.82
-  const span = x1 - x0
-  const floorY = g.y + g.h * 0.74
-  const topY = g.y + g.h * 0.32
-  ctx.save()
-  ctx.strokeStyle = GHOST_STROKE
-  ctx.lineWidth = 1.5
-  ctx.setLineDash([5, 5])
-  ctx.beginPath()
-  ctx.moveTo(x0 + span * 0.06, floorY) // задняя точка подошвы
-  ctx.quadraticCurveTo(x0 - span * 0.02, floorY - (floorY - topY) * 0.5, x0 + span * 0.04, topY + (floorY - topY) * 0.2) // задник пятки
-  ctx.quadraticCurveTo(x0 + span * 0.06, topY, x0 + span * 0.24, topY) // верх пятки
-  ctx.quadraticCurveTo(x0 + span * 0.55, topY - (floorY - topY) * 0.08, x1 - span * 0.16, topY + (floorY - topY) * 0.18) // выпуклый свод к носку
-  ctx.quadraticCurveTo(x1 - span * 0.05, topY + (floorY - topY) * 0.3, x1, floorY - (floorY - topY) * 0.14) // носок
-  ctx.quadraticCurveTo(x1 + span * 0.01, floorY - 2, x1 - span * 0.08, floorY) // кончик носка
-  ctx.lineTo(x0 + span * 0.06, floorY) // подошва
-  ctx.closePath()
-  ctx.stroke()
-  // Линия пола.
-  ctx.beginPath()
-  ctx.moveTo(g.x + g.w * 0.08, floorY + 3)
-  ctx.lineTo(g.x + g.w * 0.92, floorY + 3)
-  ctx.stroke()
-  ctx.restore()
 }
 
 /** Пунктирный placeholder банковской карты (85.6×54, ratio 1.586) в углу рамки. */
@@ -371,12 +313,18 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     loadPersonSegmenter().catch(() => undefined)
   }, [])
 
+  // Сглаживание канонического силуэта между кадрами (вне эффекта цикла).
+  const canonRef = useRef<{ t: CanonicalTransform; lastSeen: number } | null>(null)
+
   // Цикл анализа.
   useEffect(() => {
     if (!active || cameraState !== 'live') return
     let stopped = false
     const frameCanvas = document.createElement('canvas')
     const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true })!
+    // Темповый canvas для дельта-зон (сетка → растянуть на bbox маски).
+    const deltaCanvas = document.createElement('canvas')
+    const deltaCtx = deltaCanvas.getContext('2d')!
 
     const analyze = async () => {
       if (stopped || busyRef.current || document.hidden) return
@@ -415,10 +363,43 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const mw = personMask.width
         const mh = personMask.height
         const bin = personBinFromCategories(personMask.mask)
-        const contour = maskToContour(bin, mw, mh)
+        // Бумага/лист не должны попадать в силуэт (иначе канон фиттится на
+        // лист) — исключаем paper-like компоненты по яркости/насыщенности.
+        const noPaper = filterPaperComponents(bin, mw, mh, imageData.data)
+        const comp = largestComponent(noPaper, mw, mh)
+        const compBin = comp && comp.area >= mw * mh * MIN_FOOT_FRACTION ? comp.bin : null
+        const contour = compBin ? maskToContour(compBin, mw, mh) : null
         const next = frameStatus(contour, mw, mh)
         setStatus(next)
-        drawOverlay(contour, next, mw, mh)
+
+        // Канонический силуэт: стабильная форма вместо сырого дёргающегося
+        // контура. Трансформация сглаживается lerp между кадрами; при
+        // пропадании маски держим последнюю 1.5 с (fade out 300 мс).
+        const now = Date.now()
+        let canonT: CanonicalTransform | null = null
+        if (compBin) {
+          const fitted = fitCanonical(compBin, mw, mh, view === 'side' ? 'side' : 'top')
+          if (fitted) {
+            const prev = canonRef.current
+            canonT = prev ? lerpTransform(prev.t, fitted, 0.25) : fitted
+            canonRef.current = { t: canonT, lastSeen: now }
+          }
+        }
+        if (!canonT && canonRef.current && now - canonRef.current.lastSeen < 1500) {
+          canonT = canonRef.current.t
+        }
+        let canonPts: CanonPoint[] | null = null
+        let delta: DeltaGrid | null = null
+        if (canonT) {
+          canonPts = transformCanon(canonForView(view === 'side' ? 'side' : 'top'), canonT)
+          if (compBin) delta = deltaMask(compBin, mw, mh, canonPts, 4)
+        }
+        drawOverlay(contour, next, mw, mh, {
+          canon: canonPts,
+          quality: canonT?.quality ?? 0,
+          age: canonT && canonRef.current ? now - canonRef.current.lastSeen : 0,
+          delta
+        })
 
         // Автоопределение левой/правой — только на стабильном top-кадре.
         if (view === 'top' && next === 'ok' && contour && contour.length >= 8) {
@@ -456,7 +437,8 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       contour: { x: number; y: number }[] | null,
       st: FrameStatus,
       mw?: number,
-      mh?: number
+      mh?: number,
+      extras?: OverlayExtras
     ) => {
       const overlay = overlayRef.current
       const video = videoRef.current
@@ -474,22 +456,81 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       const sy = ch / (mh ?? ANALYSIS_DIM * 0.75)
       const g = guideRect(cw, ch)
 
-      // «Призрачные» гайды по ракурсу — под живой маской, тонким пунктиром.
-      if (view === 'top') drawTopGhost(ctx, g)
-      else drawSideGhost(ctx, g)
+      // Канонический силуэт — основной контур. Если маска ещё ни разу не
+      // детектилась — канон в дефолтной позиции рамки, пунктир (гайд).
+      const canon = extras?.canon
+      if (canon && canon.length >= 3) {
+        const pts = canon.map((p) => ({ x: p.x * sx, y: p.y * sy }))
+        const age = extras?.age ?? 0
+        // Fade out за 300 мс после 1.5 с без маски.
+        const alpha = age < 1200 ? 1 : Math.max(0, (1500 - age) / 300)
+        const good = (extras?.quality ?? 0) > 0.5
+        const rgb = good ? '74, 222, 128' : '232, 197, 71'
+        ctx.save()
+        ctx.globalAlpha = alpha
+        ctx.beginPath()
+        pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
+        ctx.closePath()
+        ctx.fillStyle = `rgba(${rgb}, 0.10)`
+        ctx.fill()
+        ctx.strokeStyle = `rgba(${rgb}, 0.95)`
+        ctx.lineWidth = 2.5
+        ctx.lineJoin = 'round'
+        ctx.stroke()
+        // Дельта: где реальная маска выходит за канон (подъём, ширина) —
+        // оранжевая заливка 25%.
+        const d = extras?.delta
+        if (d && d.cells.some((c) => c)) {
+          if (deltaCanvas.width !== d.gw || deltaCanvas.height !== d.gh) {
+            deltaCanvas.width = d.gw
+            deltaCanvas.height = d.gh
+          }
+          const img = deltaCtx.createImageData(d.gw, d.gh)
+          for (let i = 0; i < d.cells.length; i++) {
+            if (d.cells[i]) {
+              const o = i * 4
+              img.data[o] = 255
+              img.data[o + 1] = 150
+              img.data[o + 2] = 0
+              img.data[o + 3] = 64
+            }
+          }
+          deltaCtx.putImageData(img, 0, 0)
+          ctx.imageSmoothingEnabled = false
+          ctx.drawImage(deltaCanvas, d.x0 * sx, d.y0 * sy, d.gw * d.step * sx, d.gh * d.step * sy)
+        }
+        ctx.restore()
+      } else {
+        const defT: CanonicalTransform = {
+          cx: g.x + g.w / 2,
+          cy: g.y + g.h / 2,
+          scale: g.h * 0.38,
+          angle: 0,
+          quality: 0
+        }
+        const pts = transformCanon(canonForView(view === 'side' ? 'side' : 'top'), defT).map((p) => ({ x: p.x * sx, y: p.y * sy }))
+        ctx.save()
+        ctx.strokeStyle = GHOST_STROKE
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([5, 5])
+        ctx.beginPath()
+        pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
+        ctx.closePath()
+        ctx.stroke()
+        ctx.restore()
+      }
 
-      // Силуэт: полупрозрачная заливка + плавный контур.
+      // Реальная маска — тонкий пунктир (без заливки: читается дельта).
       if (contour && contour.length >= 3) {
         const pts = contour.map((p) => ({ x: p.x * sx, y: p.y * sy }))
         ctx.beginPath()
         pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
         ctx.closePath()
-        ctx.fillStyle = 'rgba(74, 222, 128, 0.16)'
-        ctx.fill()
-        ctx.strokeStyle = 'rgba(74, 222, 128, 0.9)'
-        ctx.lineWidth = 3
-        ctx.lineJoin = 'round'
+        ctx.strokeStyle = 'rgba(74, 222, 128, 0.7)'
+        ctx.lineWidth = 1.5
+        ctx.setLineDash([5, 4])
         ctx.stroke()
+        ctx.setLineDash([])
       }
 
       // Рамка гайда.

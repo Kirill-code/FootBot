@@ -455,6 +455,8 @@ let currentView: FootView = 'top'
 let frameMeanGray = 0
 /** Grayscale кадра — для оценки яркости кандидатов (side-ракурс). */
 let currentGray: CvMat | null = null
+/** HSV кадра — paper-детекция кандидатов (side-ракурс). */
+let currentHsv: CvMat | null = null
 /** mm/px эталона (null без эталона) — для стратегии полосы в splitFootFromLeg. */
 let currentMmPerPx: number | null = null
 
@@ -642,7 +644,8 @@ function collectFootCandidates(
   t: MatTracker,
   dbg?: FootDebug,
   allowSplit = true,
-  checkRef = true
+  checkRef = true,
+  skipPaperCheck = false
 ): FootCandidate[] {
   const contours = t.track(new cv.MatVector())
   const hierarchy = t.track(new cv.Mat())
@@ -652,6 +655,7 @@ function collectFootCandidates(
   let skipSmall = 0
   let skipRef = 0
   let skipGate = 0
+  let skipPaper = 0
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i)
     const area = cv.contourArea(cnt)
@@ -684,6 +688,52 @@ function collectFootCandidates(
     })
     const mask = t.track(cv.Mat.zeros(srcH, srcW, cv.CV_8UC1))
     cv.drawContours(mask, contours, i, new cv.Scalar(255), cv.FILLED)
+    // Side: крупный яркий ненасыщенный РАВНОМЕРНЫЙ блоб — лист/бумага на полу,
+    // а не стопа (носок/кожа тёмные или насыщенные или текстурные). stdV
+    // отличает бумагу от яркой босой кожи. Для hole-кандидатов пропускаем:
+    // их заливка по построению — яркое нутро (тёмное кольцо на светлом).
+    if (!skipPaperCheck && currentView === 'side' && currentHsv && area > frameArea * 0.05) {
+      const hsvRoi = currentHsv.roi(box)
+      const maskRoi = mask.roi(box)
+      const mean = cv.mean(hsvRoi, maskRoi) as unknown as ArrayLike<number>
+      hsvRoi.delete()
+      maskRoi.delete()
+      // stdV яркости — бумага равномерна (stdV низкий), кожа/носки текстурны.
+      let n = 0
+      let vSum = 0
+      let vSq = 0
+      for (let y = box.y; y < box.y + box.height; y += 2) {
+        for (let x = box.x; x < box.x + box.width; x += 2) {
+          if (mask.ucharPtr(y, x)[0] === 0) continue
+          const v = currentHsv.ucharPtr(y, x)[2]
+          n++
+          vSum += v
+          vSq += v * v
+        }
+      }
+      const stdV = n > 0 ? Math.sqrt(Math.max(0, vSq / n - (vSum / n) * (vSum / n))) : 0
+      // extent: бумага — плотный прямоугольник; слитая с полом босая стопа
+      // (тоже яркая/ненасыщенная) — аморфный блоб с низким заполнением bbox.
+      const extent = area / Math.max(1, box.width * box.height)
+      // extent: только плотный прямоугольный лист (typ. >0.9). Слитая с полом
+      // солнечная босая стопа — яркий/ненасыщенный/равномерный компактный блоб
+      // тоже (extent ~0.83) — по HSV-среднему неотличима от бумаги, ловить её
+      // нельзя: весь side-харнесс уходит в регресс. Порог 0.9 — консервативный.
+      const isPaper = mean[2] > 165 && mean[1] < 75 && stdV < 30 && extent > 0.9
+      dbg?.onInfo?.('paper_check', {
+        areaPct: Math.round((area / frameArea) * 1000) / 10,
+        meanV: Math.round(mean[2]),
+        meanS: Math.round(mean[1]),
+        stdV: Math.round(stdV),
+        extent: Math.round(extent * 100) / 100,
+        rejected: isPaper
+      })
+      if (isPaper) {
+        skipPaper++
+        cnt.delete()
+        continue
+      }
+    }
     const cand: FootCandidate = { contour: cnt, mask, area, borderTouch: touch, rank }
     out.push(cand)
     // Высокий блоб с сужением — вероятно «голень+стопа»: сразу пробуем отрезать.
@@ -695,8 +745,8 @@ function collectFootCandidates(
       if (cut) out.push(cut)
     }
   }
-  if (dbg && (skipSmall || skipRef || skipGate)) {
-    dbg.onInfo?.('collect_skips', { total: contours.size(), small: skipSmall, ref: skipRef, gate: skipGate, gateOn: sizeGateEnabled })
+  if (dbg && (skipSmall || skipRef || skipGate || skipPaper)) {
+    dbg.onInfo?.('collect_skips', { total: contours.size(), small: skipSmall, ref: skipRef, gate: skipGate, paper: skipPaper, gateOn: sizeGateEnabled })
   }
   return out
 }
@@ -1151,6 +1201,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     const hsv = t.track(new cv.Mat())
     cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB)
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV)
+    currentHsv = hsv
 
     // --- Сегментация стопы ---
     // Размеры ядер — адаптивные: на маленьких кадрах крупная эрозия
@@ -1239,7 +1290,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       const brightMask = t.track(morph2.clone())
       let best: FootCandidate | null = null
       let n = 0
-      for (const cand of collectFootCandidates(cv, morphHoles, src.cols, src.rows, frameArea, t, debug)) {
+      for (const cand of collectFootCandidates(cv, morphHoles, src.cols, src.rows, frameArea, t, debug, true, true, true)) {
         cand.fullMask = morphHoles
         cand.isHole = true
         cand.auxMask = brightMask
@@ -1249,7 +1300,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       debug?.onInfo?.('consider', { label: '2b_dark_on_bright', candidates: n, bestRank: best?.rank ?? null })
       if (!best && sizeGateEnabled) {
         sizeGateEnabled = false
-        for (const cand of collectFootCandidates(cv, morphHoles, src.cols, src.rows, frameArea, t, debug)) {
+        for (const cand of collectFootCandidates(cv, morphHoles, src.cols, src.rows, frameArea, t, debug, true, true, true)) {
           cand.fullMask = morphHoles
           if (!best || cand.rank > best.rank) best = cand
         }
