@@ -205,6 +205,13 @@ function getSegWorker(): Worker | null {
         | { type: 'log'; text: string }
         | { type: 'segment'; id: number; mask: Uint8Array | null; width: number; height: number }
       if (msg.type === 'state') {
+        if (msg.state === 'error') {
+          // Инициализация в worker неработоспособна (напр. tasks-vision требует
+          // DOM) — детерминированная ошибка, повторы бессмысленны. Перманентный
+          // откат на главно-поточный путь, чтобы live-поиск работал.
+          segWorkerFailed = true
+          destroySegWorker()
+        }
         setState(msg.state)
         return
       }
