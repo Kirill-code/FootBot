@@ -7,10 +7,17 @@ export default defineConfig({
     exclude: ['node_modules/**', 'dist/**', 'tools/**']
   },
   base: './',
-  // Module workers с код-сплиттингом (worker разделяет ленивый opencv-чанк
-  // с главным потоком) — только ES-формат, iife его не поддерживает.
+  // Классические (iife) workers: tasks-vision в worker грузит wasm-glue
+  // через importScripts — он доступен только в classic workers. Динамические
+  // импорты инлайнятся в чанк worker'а (opencv 15.5МБ в measureWorker — тот
+  // же объём загрузки, на один запрос меньше).
   worker: {
-    format: 'es'
+    format: 'iife',
+    rollupOptions: {
+      output: {
+        inlineDynamicImports: true
+      }
+    }
   },
   plugins: [
     react(),
@@ -33,7 +40,7 @@ export default defineConfig({
       workbox: {
         // OpenCV (~15 МБ) не прекешируем: грузится лениво при первом скане
         // и кешируется runtime-стратегией ниже.
-        globIgnores: ['**/opencv-*.js', '**/mediapipe/**'],
+        globIgnores: ['**/opencv-*.js', '**/mediapipe/**', '**/measureWorker-*.js'],
         runtimeCaching: [
           {
             // mediapipe wasm — self-hosted в public/, крупные файлы
@@ -61,7 +68,7 @@ export default defineConfig({
           },
           {
             // OpenCV.js — тяжёлый ленивый чанк, хеш в имени меняется от сборки к сборке
-            urlPattern: /\/assets\/opencv-[^/]+\.js$/,
+            urlPattern: /\/assets\/(?:opencv|measureWorker)-[^/]+\.js$/,
             handler: 'CacheFirst',
             options: {
               cacheName: 'opencv',

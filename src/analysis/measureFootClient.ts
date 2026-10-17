@@ -37,7 +37,7 @@ function getWorker(): Worker | null {
   if (workerFailed) return null
   if (!worker) {
     try {
-      worker = new Worker(new URL('./measureWorker.ts', import.meta.url), { type: 'module' })
+      worker = new Worker(new URL('./measureWorker.ts', import.meta.url))
     } catch {
       workerFailed = true
       return null

@@ -194,7 +194,7 @@ function getSegWorker(): Worker | null {
   if (segWorkerFailed) return null
   if (!segWorker) {
     try {
-      segWorker = new Worker(new URL('./segmentWorker.ts', import.meta.url), { type: 'module' })
+      segWorker = new Worker(new URL('./segmentWorker.ts', import.meta.url))
     } catch {
       segWorkerFailed = true
       return null
