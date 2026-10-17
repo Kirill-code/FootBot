@@ -89,15 +89,19 @@ export async function measureFootAsync(
       reject(new Error('Анализ занял больше 90 секунд — попробуйте переснять при лучшем освещении'))
     }, TIMEOUT_MS)
     pending.set(id, { resolve, reject, timer })
-    const transfers: ArrayBuffer[] = [imageData.data.buffer as ArrayBuffer]
-    if (pm) transfers.push(pm.mask.buffer as ArrayBuffer)
+    // Transfer отсоединяет буферы — копируем, иначе после анализа кадр/маска
+    // вызывающего опустошаются и повторный анализ ломался бы.
+    const imgCopy = new Uint8ClampedArray(imageData.data)
+    const pmCopy = pm ? pm.mask.slice() : undefined
+    const transfers: ArrayBuffer[] = [imgCopy.buffer as ArrayBuffer]
+    if (pmCopy) transfers.push(pmCopy.buffer as ArrayBuffer)
     try {
       w.postMessage(
         {
           id,
           view,
-          imageData: { width: imageData.width, height: imageData.height, data: imageData.data },
-          personMask: pm ? { width: pm.width, height: pm.height, mask: pm.mask } : undefined
+          imageData: { width: imageData.width, height: imageData.height, data: imgCopy },
+          personMask: pm && pmCopy ? { width: pm.width, height: pm.height, mask: pmCopy } : undefined
         },
         transfers
       )

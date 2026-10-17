@@ -94,6 +94,29 @@ interface GuideRect {
   h: number
 }
 
+// Heartbeat live-цикла для диагностики зависаний (window.__scanHB):
+// done — сколько кадров обработано, last — timestamp последнего, phase —
+// текущий участок ('crop'|'segment'|'contour'|'canon'|'draw'), phaseT —
+// timestamp входа в участок.
+interface ScanHB {
+  done: number
+  last: number
+  phase: string
+  phaseT: number
+}
+
+function setHB(phase: string, finished = false): void {
+  const w = window as unknown as { __scanHB?: ScanHB }
+  const hb = w.__scanHB ?? { done: 0, last: 0, phase: 'init', phaseT: Date.now() }
+  hb.phase = phase
+  hb.phaseT = Date.now()
+  if (finished) {
+    hb.done++
+    hb.last = Date.now()
+  }
+  w.__scanHB = hb
+}
+
 /** Рамка гайда: 70% ширины, 60% высоты, по центру (в долях кадра). */
 function guideRect(mw: number, mh: number): GuideRect {
   const w = mw * 0.7
@@ -392,10 +415,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   onCameraStateRef.current = onCameraState
   useEffect(() => {
     onCameraStateRef.current?.(cameraState)
+    if (cameraState === 'live') wasLiveRef.current = true
   }, [cameraState])
 
   // Сглаживание канонического силуэта между кадрами (вне эффекта цикла).
   const canonRef = useRef<{ t: CanonicalTransform; lastSeen: number } | null>(null)
+  // Последний успешно отрисованный кадр — для супервизора зависания.
+  const lastFrameRef = useRef(0)
+  // Счётчик зависаний (нет кадров >10 с) — для видимого статуса и баннера.
+  const [hangs, setHangs] = useState(0)
+  // Камера уже была жива хотя бы раз — 'starting' после этого = перезапуск.
+  const wasLiveRef = useRef(false)
   // Подряд идущие кадры без videoWidth — признак умершего потока (когда
   // track.onended по какой-то причине не пришёл).
   const noVideoCount = useRef(0)
@@ -441,6 +471,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       }
       noVideoCount.current = 0
       busyRef.current = true
+      setHB('crop')
       // Watchdog: segment() может зависнуть ВНУТРИ wasm без исключения.
       // Сегментация — в worker'е (главный поток свободен), поэтому сторож
       // отстреливается даже при мёртвом wasm: terminate + пересоздание.
@@ -482,6 +513,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         cropCtx.drawImage(frameCanvas, cx0, cy0, cw, ch, 0, 0, crw, crh)
         const cropData = cropCtx.getImageData(0, 0, crw, crh)
 
+        setHB('segment')
         const personMask = await getPersonMaskAsync(cropData)
         if (stopped) return
         if (!personMask) {
@@ -489,6 +521,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
           drawOverlay(null, nnState === 'error' ? 'error' : 'loading')
           return
         }
+        setHB('contour')
         const mw = personMask.width
         const mh = personMask.height
         const bin = personBinFromCategories(personMask.mask)
@@ -509,6 +542,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         // Канонический силуэт: стабильная форма вместо сырого дёргающегося
         // контура. Трансформация сглаживается lerp между кадрами; при
         // пропадании маски держим последнюю 1.5 с (fade out 300 мс).
+        setHB('canon')
         const now = Date.now()
         let canonT: CanonicalTransform | null = null
         if (compBin) {
@@ -544,12 +578,16 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const deltaFull = delta
           ? { ...delta, x0: delta.x0 / cropScale + cx0, y0: delta.y0 / cropScale + cy0, step: delta.step / cropScale }
           : null
+        setHB('draw')
         drawOverlay(contour, next, w, h, {
           canon: canonFull,
           quality: canonT?.quality ?? 0,
           age: canonT && canonRef.current ? now - canonRef.current.lastSeen : 0,
           delta: deltaFull
         })
+        // Кадр отрисован: супервизор зависания молчит, счётчик сброшен.
+        lastFrameRef.current = Date.now()
+        if (hangs > 0) setHangs(0)
 
         // Автоопределение левой/правой — только на стабильном top-кадре.
         if (view === 'top' && next === 'ok' && contour && contour.length >= 8) {
@@ -702,11 +740,28 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       if (chromeRef.current) drawHeader(ctx, cw, view)
     }
 
+    // Супервизор зависания: нет успешных кадров >10 с (камера жива, вкладка
+    // видима) — красный статус + полный перезапуск (камера + worker
+    // сегментации). Скрытая вкладка кадры не ждёт — ок.
+    lastFrameRef.current = Date.now()
+    const superTimer = setInterval(() => {
+      if (stopped || document.hidden) return
+      if (Date.now() - lastFrameRef.current > 10_000) {
+        lastFrameRef.current = Date.now() // дедуп: один перезапуск на эпизод
+        setHangs((c) => c + 1)
+        stopStream()
+        resetSegmentWorker()
+        setCameraState('starting')
+        setCamAttempt((n) => n + 1)
+      }
+    }, 1000)
+
     const timer = setInterval(() => void analyze(), LOOP_MS)
     void analyze()
     return () => {
       stopped = true
       clearInterval(timer)
+      clearInterval(superTimer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, cameraState, view, nnState, cycleGen])
@@ -757,6 +812,23 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       ])
     } catch {
       personMask = null
+    }
+    // Маска должна быть размером с кадр съёмки (segmenter IMAGE-режима возвращает
+    // маску в размер входа). При расхождении — отбрасываем (ниже — fallback).
+    if (personMask && (personMask.width !== w || personMask.height !== h)) {
+      console.warn('[capture] mask size mismatch', { mask: [personMask.width, personMask.height], frame: [w, h] })
+      personMask = null
+    }
+    if (personMask) {
+      let person = 0
+      const m = personMask.mask
+      for (let i = 0; i < m.length; i++) {
+        const c = m[i]
+        if (c === 2 || c === 3 || c === 4) person++
+      }
+      console.log('[capture] mask', { w, h, personFrac: Math.round((person / m.length) * 1000) / 1000 })
+    } else {
+      console.log('[capture] mask', { w: 0, h: 0, personFrac: 0 })
     }
     onCapture({ blob, imageData, canvas, personMask })
   }
@@ -836,6 +908,16 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       ? `${STATUS_TEXT[status]} · положите банковскую карту в углу рамки (или лист А4, если камера высоко)`
       : STATUS_TEXT[status]
 
+  // Видимые статусы сбоев (раньше — молчаливые): зависание цикла / перезапуск камеры.
+  const noticeText =
+    hangs > 0
+      ? `Перезапускаем камеру/анализ… (зависание, попытка ${hangs})`
+      : cameraState === 'starting' && wasLiveRef.current
+        ? 'Камера перезапускается…'
+        : null
+  const noticeColor = hangs > 0 ? '#f87171' : '#e8c547'
+  const hangBanner = hangs > 2
+
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       <div
@@ -886,6 +968,23 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
           </div>
         )}
       </div>
+
+      {/* Статусы сбоев показываем даже в кастомном chrome (fullscan). */}
+      {noticeText && (
+        <p className="hint" style={{ margin: 0, color: noticeColor, textAlign: 'center', fontWeight: 600 }}>
+          {noticeText}
+        </p>
+      )}
+      {hangBanner && (
+        <div className="card" style={{ borderColor: '#f87171', display: 'grid', gap: 10 }}>
+          <p className="hint" style={{ color: '#f87171', margin: 0, fontWeight: 600 }}>
+            Анализ завис. Переснимите ракурс или выберите фото из галереи.
+          </p>
+          <button className="btn btn-block" onClick={() => galleryRef.current?.click()}>
+            Выбрать фото из галереи
+          </button>
+        </div>
+      )}
 
       {chrome && (
         <>

@@ -135,6 +135,13 @@ export default function ScanPage() {
         const personMask =
           sh.top.personMask ??
           (nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData) : null)
+        console.log('[analyze] top', {
+          hasMask: !!personMask,
+          maskW: personMask?.width ?? 0,
+          maskH: personMask?.height ?? 0,
+          frameW: sh.top.imageData.width,
+          frameH: sh.top.imageData.height
+        })
         const m = await measureFootAsync(sh.top.imageData, 'top', personMask)
         results.top = m
       }
@@ -144,6 +151,13 @@ export default function ScanPage() {
         const personMask =
           sh.side.personMask ??
           (nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData) : null)
+        console.log('[analyze] side', {
+          hasMask: !!personMask,
+          maskW: personMask?.width ?? 0,
+          maskH: personMask?.height ?? 0,
+          frameW: sh.side.imageData.width,
+          frameH: sh.side.imageData.height
+        })
         const m = await measureFootAsync(sh.side.imageData, 'side', personMask)
         results.side = m
       }
