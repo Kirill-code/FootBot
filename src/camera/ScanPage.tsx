@@ -3,6 +3,7 @@ import { db, type FootSide } from '../profile/db'
 import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
 import FullScanScreen, { type ScanShots } from './FullScanScreen'
+import ResultSnapshot from './ResultSnapshot'
 
 // Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку) в
 // полноэкранном режиме (FullScanScreen), ПОТОМ анализ в Web Worker.
@@ -87,7 +88,6 @@ export default function ScanPage() {
   const [analyzingView, setAnalyzingView] = useState<string>('')
   const [shots, setShots] = useState<Partial<Record<FootView, Shot>>>({})
   const [analysis, setAnalysis] = useState<Partial<Record<FootView, FootMeasurement>>>({})
-  const [previews, setPreviews] = useState<Partial<Record<FootView, string>>>({})
   const [errorText, setErrorText] = useState('')
   const [model, setModel] = useState<FootModel | null>(null)
   const [manualOpen, setManualOpen] = useState(false)
@@ -126,14 +126,12 @@ export default function ScanPage() {
       }
       const { measureFootAsync } = await import('../analysis/measureFootClient')
       const results: Partial<Record<FootView, FootMeasurement>> = {}
-      const pv: Partial<Record<FootView, string>> = {}
       // 2. Анализ top — в Web Worker: UI живой, OpenCV не блокирует поток.
       if (sh.top) {
         await phase('Анализируем фото 1/2 (сверху)…')
         const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData) : null
         const m = await measureFootAsync(sh.top.imageData, 'top', personMask)
         results.top = m
-        pv.top = drawPreview(sh.top.canvas, m.footContour)
       }
       // 3. Анализ side.
       if (sh.side) {
@@ -141,11 +139,9 @@ export default function ScanPage() {
         const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData) : null
         const m = await measureFootAsync(sh.side.imageData, 'side', personMask)
         results.side = m
-        pv.side = drawPreview(sh.side.canvas, m.footContour)
       }
       await phase('Строим модель стопы…')
       setAnalysis(results)
-      setPreviews(pv)
       setPhase('results')
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : String(err))
@@ -248,7 +244,7 @@ export default function ScanPage() {
             <p className="hint" style={{ color: '#ff7a7a' }}>Замеры ракурсов заметно различаются — рекомендуем переснять.</p>
           )}
         </div>
-        <button className="btn btn-block" onClick={() => { setPhase('collect'); setShots({}); setAnalysis({}); setPreviews({}); setModel(null) }}>
+        <button className="btn btn-block" onClick={() => { setPhase('collect'); setShots({}); setAnalysis({}); setModel(null) }}>
           Новое сканирование
         </button>
       </main>
@@ -281,6 +277,8 @@ export default function ScanPage() {
 
   if (phase === 'results') {
     const anyMeasured = viewMeasured(analysis.top, 'top') || viewMeasured(analysis.side, 'side')
+    // Модель для подъёма в мм (instepHeightMm = side.ratio × top.lengthMm).
+    const displayModel = buildFootModel(analysis)
     return (
       <main className="page">
         <h1 className="page-title">Результат анализа</h1>
@@ -292,15 +290,21 @@ export default function ScanPage() {
           return (
             <div key={view} className="card" style={{ display: 'grid', gap: 8 }}>
               <p style={{ margin: 0, fontWeight: 600 }}>{STEPS[i].title}</p>
-              {previews[view] && <img src={previews[view]} alt={STEPS[i].title} style={{ width: '100%', borderRadius: 10 }} />}
+              {shots[view] && (
+                <ResultSnapshot
+                  url={shots[view]!.previewUrl}
+                  contour={m?.footContour ?? null}
+                  recognized={!!m && !fail}
+                />
+              )}
               {!fail && m ? (
                 <>
                   <p className="result-value">
                     {view === 'top'
-                      ? `${m.lengthMm ?? '—'} мм`
-                      : m.instepHeightMm !== null
-                        ? `${m.instepHeightMm} мм`
-                        : `${Math.round((m.instepRatio ?? 0) * 100)}%`}
+                      ? `Длина ${m.lengthMm ?? '—'} мм · Ширина ${m.widthMm ?? '—'} мм`
+                      : displayModel.instepHeightMm !== null
+                        ? `Подъём ${displayModel.instepHeightMm} мм`
+                        : `${Math.round((m.instepRatio ?? 0) * 100)}% длины стопы`}
                   </p>
                   <p className="hint" style={{ color: 'var(--accent)', textAlign: 'center' }}>
                     {view === 'top'

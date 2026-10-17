@@ -1,6 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from './db'
 import { useEffect, useState } from 'react'
+import ResultSnapshot from '../camera/ResultSnapshot'
 
 function PhotoItem({ blob, foot, createdAt, footLengthMm, footWidthMm }: { blob: Blob; foot: 'left' | 'right'; createdAt: number; footLengthMm: number | null; footWidthMm: number | null }) {
   const [url, setUrl] = useState<string | null>(null)
@@ -30,8 +31,19 @@ function PhotoItem({ blob, foot, createdAt, footLengthMm, footWidthMm }: { blob:
 export default function ProfilePage() {
   const photos = useLiveQuery(() => db.photos.orderBy('createdAt').reverse().toArray(), [])
   const model = useLiveQuery(() => db.footModels.orderBy('createdAt').reverse().first(), [])
+  // Контур top-ракурса хранится на замере; фото — последний top-снимок.
+  const lastMeasurement = useLiveQuery(() => db.measurements.orderBy('createdAt').reverse().first(), [])
 
   const volumeText = { low: 'низкий', medium: 'средний', high: 'высокий' } as const
+
+  const topPhoto = photos?.find((p) => p.footWidthMm !== null)
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null)
+  useEffect(() => {
+    if (!topPhoto) return
+    const u = URL.createObjectURL(topPhoto.blob)
+    setSnapshotUrl(u)
+    return () => URL.revokeObjectURL(u)
+  }, [topPhoto])
 
   return (
     <main className="page">
@@ -41,6 +53,9 @@ export default function ProfilePage() {
       {model && (
         <div className="card" style={{ display: 'grid', gap: 6 }}>
           <p style={{ margin: 0, fontWeight: 600 }}>Модель стопы</p>
+          {snapshotUrl && lastMeasurement?.contour && lastMeasurement.contour.length >= 3 && (
+            <ResultSnapshot url={snapshotUrl} contour={lastMeasurement.contour} recognized />
+          )}
           <p className="hint">
             {model.lengthMm !== null && <>Длина <strong>{model.lengthMm} мм</strong> · </>}
             {model.widthMm !== null && <>ширина <strong>{model.widthMm} мм</strong> · </>}

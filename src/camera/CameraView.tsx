@@ -294,6 +294,21 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         return
       }
       streamRef.current = s
+      // Смерть камеры mid-session (другой вкладкой/ОС — track 'ended',
+      // stream 'inactive'): авто-переоткрытие через механизм retry.
+      let streamEnded = false
+      const onStreamEnd = () => {
+        if (cancelled || streamEnded) return
+        streamEnded = true
+        if (document.hidden) return // в фоне не дёргаем — cleanup эффекта при разворачивании
+        stopStream()
+        setCameraState('starting')
+        setCamAttempt((n) => n + 1)
+      }
+      s.getTracks().forEach((tr) => {
+        tr.onended = onStreamEnd
+      })
+      ;(s as MediaStream & { oninactive?: () => void }).oninactive = onStreamEnd
       const v = videoRef.current
       if (v) {
         v.srcObject = s
@@ -323,6 +338,9 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
 
   // Сглаживание канонического силуэта между кадрами (вне эффекта цикла).
   const canonRef = useRef<{ t: CanonicalTransform; lastSeen: number } | null>(null)
+  // Подряд идущие кадры без videoWidth — признак умершего потока (когда
+  // track.onended по какой-то причине не пришёл).
+  const noVideoCount = useRef(0)
 
   // Цикл анализа.
   useEffect(() => {
@@ -339,7 +357,19 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     const analyze = async () => {
       if (stopped || busyRef.current || document.hidden) return
       const video = videoRef.current
-      if (!video || !video.videoWidth) return
+      if (!video || !video.videoWidth) {
+        noVideoCount.current++
+        // ≥5 подряд (~2 с) — поток мёртв: та же процедура восстановления,
+        // что и по track.onended. Дедупликация: при 'starting' не повторяем.
+        if (noVideoCount.current >= 5 && cameraState === 'live') {
+          noVideoCount.current = 0
+          stopStream()
+          setCameraState('starting')
+          setCamAttempt((n) => n + 1)
+        }
+        return
+      }
+      noVideoCount.current = 0
       busyRef.current = true
       // Watchdog: segment() может зависнуть ВНУТРИ wasm без исключения.
       // Сегментация — в worker'е (главный поток свободен), поэтому сторож
