@@ -6,7 +6,7 @@
 // Fallback: недоступный/запрещённый getUserMedia → старый input capture.
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
-import type { FootView } from '../analysis/measureFoot'
+import type { FootView, PersonMask } from '../analysis/measureFoot'
 import type { FootSide } from '../profile/db'
 import {
   getPersonMaskAsync,
@@ -47,6 +47,8 @@ export interface CameraShot {
   blob: Blob
   imageData: ImageData
   canvas: HTMLCanvasElement
+  /** NN-маска полного кадра съёмки (те же данные, что видел live-цикл). */
+  personMask?: PersonMask | null
 }
 
 interface CameraViewProps {
@@ -62,6 +64,8 @@ interface CameraViewProps {
   chrome?: boolean
   /** Наружный доступ к спуску/галерее для кастомной кнопки спуска. */
   actionsRef?: MutableRefObject<{ capture: () => void; openGallery: () => void } | null>
+  /** Состояние камеры наружу (напр. FullScanScreen ждёт 'live' между шагами). */
+  onCameraState?: (state: CameraState) => void
 }
 
 type CameraState = 'starting' | 'live' | 'denied'
@@ -163,6 +167,51 @@ function drawCardGhost(ctx: CanvasRenderingContext2D, g: GuideRect, corner: Corn
   ctx.restore()
 }
 
+/** Оверлей по умолчанию (без маски): рамка + пунктирный канон-подсказка.
+ * Используется при смене ракурса — чтобы не оставался слепок шага 1. */
+function drawDefaultOverlay(
+  overlay: HTMLCanvasElement | null,
+  video: HTMLVideoElement | null,
+  view: FootView
+): void {
+  if (!overlay || !video) return
+  const cw = video.clientWidth
+  const ch = video.clientHeight
+  if (cw === 0 || ch === 0) return
+  if (overlay.width !== cw || overlay.height !== ch) {
+    overlay.width = cw
+    overlay.height = ch
+  }
+  const ctx = overlay.getContext('2d')!
+  ctx.clearRect(0, 0, cw, ch)
+  const g = guideRect(cw, ch)
+  const cv2 = view === 'side' ? 'side' : 'top'
+  const defT: CanonicalTransform = {
+    cx: g.x + g.w / 2,
+    cy: g.y + g.h / 2,
+    scale: g.h * 0.38,
+    angle: 0,
+    quality: 0
+  }
+  const pts = transformCanon(canonForView(cv2), defT)
+  ctx.save()
+  ctx.strokeStyle = GHOST_STROKE
+  ctx.lineWidth = 1.5
+  ctx.setLineDash([5, 5])
+  ctx.beginPath()
+  pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
+  ctx.closePath()
+  ctx.stroke()
+  ctx.restore()
+  // Рамка гайда (серая — статус «загрузка/поиск»).
+  ctx.strokeStyle = STATUS_COLOR.loading
+  ctx.lineWidth = 3
+  ctx.setLineDash([10, 8])
+  ctx.strokeRect(g.x, g.y, g.w, g.h)
+  ctx.setLineDash([])
+  if (view === 'top') drawCardGhost(ctx, g, 'br')
+}
+
 /** Текстовая шапка видоискателя: цель шага + постоянные напоминания. */
 function drawHeader(ctx: CanvasRenderingContext2D, cw: number, view: FootView) {
   const title = view === 'top' ? 'Снимаем СВЕРХУ: длина и ширина' : 'Снимаем СБОКУ: высота подъёма'
@@ -190,7 +239,7 @@ function drawHeader(ctx: CanvasRenderingContext2D, cw: number, view: FootView) {
   ctx.restore()
 }
 
-export default function CameraView({ view, onCapture, foot, onFootGuess, active = true, chrome = true, actionsRef }: CameraViewProps) {
+export default function CameraView({ view, onCapture, foot, onFootGuess, active = true, chrome = true, actionsRef, onCameraState }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -329,18 +378,39 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       cancelled = true
       stopStream()
     }
+    // view в deps: смена ракурса = полный перезапуск потока с пустым
+    // состоянием сканирования (пользователь просил «пустой кеш» на шаге 2).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, camAttempt])
+  }, [active, camAttempt, view])
 
   // Подписка на состояние сегментатора: статусы приходят и из worker'а
   // (live-цикл) и из главно-поточного fallback (финальный анализ).
   useEffect(() => subscribePersonSegmentState(setNnState), [])
+
+  // Состояние камеры наружу (FullScanScreen ждёт 'live' между шагами).
+  const onCameraStateRef = useRef(onCameraState)
+  onCameraStateRef.current = onCameraState
+  useEffect(() => {
+    onCameraStateRef.current?.(cameraState)
+  }, [cameraState])
 
   // Сглаживание канонического силуэта между кадрами (вне эффекта цикла).
   const canonRef = useRef<{ t: CanonicalTransform; lastSeen: number } | null>(null)
   // Подряд идущие кадры без videoWidth — признак умершего потока (когда
   // track.onended по какой-то причине не пришёл).
   const noVideoCount = useRef(0)
+
+  // Смена ракурса: сброс ВСЕГО аналитического состояния шага (канон,
+  // сглаживание, laterality, статус, счётчики) + оверлей в дефолт (подсказка
+  // рамки). NN-модель НЕ трогаем — «пустой кеш» про состояние сканирования.
+  useEffect(() => {
+    canonRef.current = null
+    noVideoCount.current = 0
+    busyRef.current = false
+    setLaterality(null)
+    setStatus('loading')
+    drawDefaultOverlay(overlayRef.current, videoRef.current, view)
+  }, [view])
 
   // Цикл анализа.
   useEffect(() => {
@@ -678,7 +748,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     ctx.drawImage(video, 0, 0, w, h)
     const imageData = ctx.getImageData(0, 0, w, h)
     const blob = await canvasToBlob(canvas)
-    onCapture({ blob, imageData, canvas })
+    // Та же маска, что и в live (полный кадр съёмки) — без блокировки дольше 8 с.
+    let personMask: PersonMask | null = null
+    try {
+      personMask = await Promise.race([
+        getPersonMaskAsync(imageData),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))
+      ])
+    } catch {
+      personMask = null
+    }
+    onCapture({ blob, imageData, canvas, personMask })
   }
 
   async function handleFile(file: File) {

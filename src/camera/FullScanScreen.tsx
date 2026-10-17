@@ -42,6 +42,7 @@ const smallRoundBtn: React.CSSProperties = {
 
 export default function FullScanScreen({ foot, onFootChange, onClose, onComplete }: FullScanScreenProps) {
   const [stage, setStage] = useState<Stage>('top')
+  const [camLive, setCamLive] = useState(false)
   const topShot = useRef<CameraShot | null>(null)
   const actionsRef = useRef<{ capture: () => void; openGallery: () => void } | null>(null)
 
@@ -86,6 +87,7 @@ export default function FullScanScreen({ foot, onFootChange, onClose, onComplete
           onFootGuess={onFootChange}
           chrome={false}
           actionsRef={actionsRef}
+          onCameraState={(st) => setCamLive(st === 'live')}
         />
       </div>
 
@@ -170,8 +172,9 @@ export default function FullScanScreen({ foot, onFootChange, onClose, onComplete
         </div>
       </div>
 
-      {/* Переход между ракурсами. */}
-      {stage === 'transition' && (
+      {/* Переход между ракурсами: висит, пока камера шага 2 не открылась
+          (при смене view поток перезапускается — не показываем чёрный экран). */}
+      {stage === 'transition' && !camLive && (
         <div
           style={{
             position: 'absolute',

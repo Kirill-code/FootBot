@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
-import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
+import type { FootContourPoint, FootMeasurement, FootView, PersonMask } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
 import FullScanScreen, { type ScanShots } from './FullScanScreen'
 import ResultSnapshot from './ResultSnapshot'
@@ -46,6 +46,7 @@ interface Shot {
   previewUrl: string
   imageData: ImageData
   canvas: HTMLCanvasElement
+  personMask?: PersonMask | null
 }
 
 /** fileToImageData и canvasToBlob переехали в ./imageIO (общие с CameraView). */
@@ -127,16 +128,22 @@ export default function ScanPage() {
       const { measureFootAsync } = await import('../analysis/measureFootClient')
       const results: Partial<Record<FootView, FootMeasurement>> = {}
       // 2. Анализ top — в Web Worker: UI живой, OpenCV не блокирует поток.
+      // Маска из capture (те же данные, что видел live); при её отсутупи —
+      // сегментируем полный кадр здесь (прежний fallback).
       if (sh.top) {
         await phase('Анализируем фото 1/2 (сверху)…')
-        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData) : null
+        const personMask =
+          sh.top.personMask ??
+          (nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData) : null)
         const m = await measureFootAsync(sh.top.imageData, 'top', personMask)
         results.top = m
       }
       // 3. Анализ side.
       if (sh.side) {
         await phase('Анализируем фото 2/2 (сбоку)…')
-        const personMask = nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData) : null
+        const personMask =
+          sh.side.personMask ??
+          (nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData) : null)
         const m = await measureFootAsync(sh.side.imageData, 'side', personMask)
         results.side = m
       }
