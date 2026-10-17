@@ -14,6 +14,12 @@ import {
   subscribePersonSegmentState,
   type PersonSegmentState
 } from '../analysis/personSegment'
+
+// Диагностика live-цикла для CDP: число завершённых кадров и время последнего.
+const scanHB = { done: 0, last: 0 }
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __scanHB: typeof scanHB }).__scanHB = scanHB
+}
 import { detectLaterality } from '../analysis/footLaterality'
 import { largestComponent, maskToContour, personBinFromCategories } from './liveContour'
 import {
@@ -198,6 +204,12 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   const [laterality, setLaterality] = useState<{ side: FootSide; confidence: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const galleryRef = useRef<HTMLInputElement>(null)
+  // Диагностика/самовосстановление live-цикла: heartbeat последнего
+  // завершённого кадра; супервизор принудительно пересобирает эффект анализа,
+  // если кадры перестали идти (любой класс залипания).
+  const [cycleGen, setCycleGen] = useState(0)
+  const lastDoneRef = useRef(0)
+  const drawOverlayRef = useRef<((c: { x: number; y: number }[] | null, s: FrameStatus, mw?: number, mh?: number) => void) | null>(null)
   // Пропы в refs — чтобы эффект анализа не пересоздавался на рендерах родителя.
   const footRef = useRef(foot)
   footRef.current = foot
@@ -456,6 +468,9 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       } finally {
         clearTimeout(watchdog)
         busyRef.current = false
+        lastDoneRef.current = Date.now()
+        scanHB.done++
+        scanHB.last = Date.now()
       }
     }
 
@@ -479,6 +494,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       mh?: number,
       extras?: OverlayExtras
     ) => {
+      drawOverlayRef.current = drawOverlay
       const overlay = overlayRef.current
       const video = videoRef.current
       if (!overlay || !video) return
@@ -593,7 +609,31 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       clearInterval(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, cameraState, view, nnState])
+  }, [active, cameraState, view, nnState, cycleGen])
+
+  // Супервизор: если завершённые кадры не появляются дольше 10 с при живой
+  // камере — цикл анализа залип (любая причина): принудительная пересборка
+  // эффекта (свежий interval, сброшенный busy) + пересоздание сегментатора.
+  useEffect(() => {
+    if (!active || cameraState !== 'live') return
+    lastDoneRef.current = Date.now()
+    const sup = setInterval(() => {
+      if (document.hidden) {
+        lastDoneRef.current = Date.now()
+        return
+      }
+      if (Date.now() - lastDoneRef.current > 10_000) {
+        busyRef.current = false
+        resetSegmentWorker()
+        drawOverlayRef.current?.(null, 'loading')
+        setStatus('loading')
+        lastDoneRef.current = Date.now()
+        setCycleGen((g) => g + 1)
+      }
+    }, 5_000)
+    return () => clearInterval(sup)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, cameraState, cycleGen])
 
   async function capture() {
     const video = videoRef.current
