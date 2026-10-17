@@ -9,13 +9,15 @@ import type { FootContourPoint } from '../analysis/measureFoot'
 interface ResultSnapshotProps {
   /** object/data URL фото (чистое превью кадра). */
   url: string
-  /** Контур стопы из FootMeasurement.footContour, или null. */
+  /** Контур стопы (live-силуэт съёмки при наличии, иначе из анализа). */
   contour?: FootContourPoint[] | null
   /** false — ракурс не распознан: подпись поверх фото, без маски. */
   recognized: boolean
+  /** Доп. пометка (напр. «силуэт не зафиксирован» — live-статус был не ok). */
+  note?: string
 }
 
-export default function ResultSnapshot({ url, contour, recognized }: ResultSnapshotProps) {
+export default function ResultSnapshot({ url, contour, recognized, note }: ResultSnapshotProps) {
   const imgRef = useRef<HTMLImageElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -52,6 +54,23 @@ export default function ResultSnapshot({ url, contour, recognized }: ResultSnaps
         ref={canvasRef}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
       />
+      {recognized && note && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            padding: '4px 8px',
+            background: 'rgba(0, 0, 0, 0.55)',
+            color: '#e8c547',
+            fontSize: 12,
+            textAlign: 'center'
+          }}
+        >
+          {note}
+        </div>
+      )}
       {!recognized && (
         <div
           style={{

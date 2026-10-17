@@ -46,7 +46,27 @@ interface Shot {
   previewUrl: string
   imageData: ImageData
   canvas: HTMLCanvasElement
-  personMask?: PersonMask | null
+  /** Live-силуэт момента съёмки (координаты кадра съёмки) — единый источник
+   * истины слепка и маски анализа. null/undefined — не зафиксирован. */
+  liveContour?: FootContourPoint[] | null
+}
+
+/** Live-контур → маска классов в размере кадра (person=класс 2), для NN-прохода
+ * measureFoot. Растеризация canvas-заливкой — один раз на ракурс, дёшево. */
+function contourToPersonMask(contour: FootContourPoint[], w: number, h: number): PersonMask {
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const ctx = c.getContext('2d')!
+  ctx.beginPath()
+  contour.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
+  ctx.closePath()
+  ctx.fillStyle = '#fff'
+  ctx.fill()
+  const rgba = ctx.getImageData(0, 0, w, h).data
+  const mask = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) if (rgba[i * 4] > 127) mask[i] = 2
+  return { mask, width: w, height: h }
 }
 
 /** fileToImageData и canvasToBlob переехали в ./imageIO (общие с CameraView). */
@@ -132,10 +152,15 @@ export default function ScanPage() {
       // сегментируем полный кадр здесь (прежний fallback).
       if (sh.top) {
         await phase('Анализируем фото 1/2 (сверху)…')
-        const personMask =
-          sh.top.personMask ??
-          (nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData) : null)
+        // Единый источник истины: live-силуэт съёмки растрируется в маску —
+        // NN-кандидат measureFoot == силуэт, который видел пользователь.
+        const personMask = sh.top.liveContour
+          ? contourToPersonMask(sh.top.liveContour, sh.top.imageData.width, sh.top.imageData.height)
+          : nnOk
+            ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData)
+            : null
         console.log('[analyze] top', {
+          fromLive: !!sh.top.liveContour,
           hasMask: !!personMask,
           maskW: personMask?.width ?? 0,
           maskH: personMask?.height ?? 0,
@@ -148,10 +173,13 @@ export default function ScanPage() {
       // 3. Анализ side.
       if (sh.side) {
         await phase('Анализируем фото 2/2 (сбоку)…')
-        const personMask =
-          sh.side.personMask ??
-          (nnOk ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData) : null)
+        const personMask = sh.side.liveContour
+          ? contourToPersonMask(sh.side.liveContour, sh.side.imageData.width, sh.side.imageData.height)
+          : nnOk
+            ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData)
+            : null
         console.log('[analyze] side', {
+          fromLive: !!sh.side.liveContour,
           hasMask: !!personMask,
           maskW: personMask?.width ?? 0,
           maskH: personMask?.height ?? 0,
@@ -314,8 +342,9 @@ export default function ScanPage() {
               {shots[view] && (
                 <ResultSnapshot
                   url={shots[view]!.previewUrl}
-                  contour={m?.footContour ?? null}
+                  contour={shots[view]!.liveContour ?? m?.footContour ?? null}
                   recognized={!!m && !fail}
+                  note={m && !fail && !shots[view]!.liveContour ? 'силуэт не зафиксирован' : undefined}
                 />
               )}
               {!fail && m ? (

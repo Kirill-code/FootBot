@@ -6,7 +6,7 @@
 // Fallback: недоступный/запрещённый getUserMedia → старый input capture.
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
-import type { FootView, PersonMask } from '../analysis/measureFoot'
+import type { FootView, FootContourPoint } from '../analysis/measureFoot'
 import type { FootSide } from '../profile/db'
 import {
   getPersonMaskAsync,
@@ -15,8 +15,10 @@ import {
   type PersonSegmentState
 } from '../analysis/personSegment'
 
-// Диагностика live-цикла для CDP: число завершённых кадров и время последнего.
-const scanHB = { done: 0, last: 0 }
+// Диагностика live-цикла для CDP: число завершённых кадров, время последнего,
+// фаза текущего участка. ОДНА ссылка — setHB мутирует её же (иначе CDP-скрипт
+// и внутренние счётчики смотрели бы на разные объекты).
+const scanHB = { done: 0, last: 0, phase: 'init', phaseT: 0 }
 if (typeof window !== 'undefined') {
   ;(window as unknown as { __scanHB: typeof scanHB }).__scanHB = scanHB
 }
@@ -47,8 +49,9 @@ export interface CameraShot {
   blob: Blob
   imageData: ImageData
   canvas: HTMLCanvasElement
-  /** NN-маска полного кадра съёмки (те же данные, что видел live-цикл). */
-  personMask?: PersonMask | null
+  /** Live-силуэт момента съёмки (координаты кадра съёмки ≤1600px), только
+   * если live-статус был 'ok' и кадр свежий (<2с). null — слепок не зафиксирован. */
+  liveContour?: FootContourPoint[] | null
 }
 
 interface CameraViewProps {
@@ -98,23 +101,13 @@ interface GuideRect {
 // done — сколько кадров обработано, last — timestamp последнего, phase —
 // текущий участок ('crop'|'segment'|'contour'|'canon'|'draw'), phaseT —
 // timestamp входа в участок.
-interface ScanHB {
-  done: number
-  last: number
-  phase: string
-  phaseT: number
-}
-
 function setHB(phase: string, finished = false): void {
-  const w = window as unknown as { __scanHB?: ScanHB }
-  const hb = w.__scanHB ?? { done: 0, last: 0, phase: 'init', phaseT: Date.now() }
-  hb.phase = phase
-  hb.phaseT = Date.now()
+  scanHB.phase = phase
+  scanHB.phaseT = Date.now()
   if (finished) {
-    hb.done++
-    hb.last = Date.now()
+    scanHB.done++
+    scanHB.last = Date.now()
   }
-  w.__scanHB = hb
 }
 
 /** Рамка гайда: 70% ширины, 60% высоты, по центру (в долях кадра). */
@@ -424,6 +417,16 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   const lastFrameRef = useRef(0)
   // Счётчик зависаний (нет кадров >10 с) — для видимого статуса и баннера.
   const [hangs, setHangs] = useState(0)
+  // Последний успешный live-результат: контур в координатах полного
+  // анализ-кадра (640-пространство) + статус + timestamp. Источник слепка
+  // и маски финального анализа — единый источник истины «что видел юзер».
+  const liveSnapshotRef = useRef<{
+    contour: { x: number; y: number }[]
+    status: FrameStatus
+    frameW: number
+    frameH: number
+    at: number
+  } | null>(null)
   // Камера уже была жива хотя бы раз — 'starting' после этого = перезапуск.
   const wasLiveRef = useRef(false)
   // Подряд идущие кадры без videoWidth — признак умершего потока (когда
@@ -437,6 +440,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     canonRef.current = null
     noVideoCount.current = 0
     busyRef.current = false
+    liveSnapshotRef.current = null
     setLaterality(null)
     setStatus('loading')
     drawDefaultOverlay(overlayRef.current, videoRef.current, view)
@@ -588,6 +592,10 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         // Кадр отрисован: супервизор зависания молчит, счётчик сброшен.
         lastFrameRef.current = Date.now()
         if (hangs > 0) setHangs(0)
+        // Единый источник истины слепка: контур в 640-координатах полного кадра.
+        liveSnapshotRef.current = contour
+          ? { contour, status: next, frameW: w, frameH: h, at: Date.now() }
+          : null
 
         // Автоопределение левой/правой — только на стабильном top-кадре.
         if (view === 'top' && next === 'ok' && contour && contour.length >= 8) {
@@ -782,6 +790,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         resetSegmentWorker()
         drawOverlayRef.current?.(null, 'loading')
         setStatus('loading')
+        setHangs((c) => c + 1)
         lastDoneRef.current = Date.now()
         setCycleGen((g) => g + 1)
       }
@@ -803,34 +812,22 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     ctx.drawImage(video, 0, 0, w, h)
     const imageData = ctx.getImageData(0, 0, w, h)
     const blob = await canvasToBlob(canvas)
-    // Та же маска, что и в live (полный кадр съёмки) — без блокировки дольше 8 с.
-    let personMask: PersonMask | null = null
-    try {
-      personMask = await Promise.race([
-        getPersonMaskAsync(imageData),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))
-      ])
-    } catch {
-      personMask = null
+    // Слепок — live-силуэт, который пользователь ВИДЕЛ при спуске (статус 'ok',
+    // свежесть <2 с). Пересегментация полного кадра убрана: другой вход NN
+    // давал другую маску и лишние 1–3 с после нажатия. Координаты: 640-кадр →
+    // кадр съёмки (оба — пропорциональные даунскейлы видео, аспект общий).
+    const snap = liveSnapshotRef.current
+    let liveContour: FootContourPoint[] | null = null
+    if (snap && snap.status === 'ok' && Date.now() - snap.at < 2000 && snap.frameW > 0) {
+      const k = w / snap.frameW
+      liveContour = snap.contour.map((p) => ({ x: Math.round(p.x * k), y: Math.round(p.y * k) }))
     }
-    // Маска должна быть размером с кадр съёмки (segmenter IMAGE-режима возвращает
-    // маску в размер входа). При расхождении — отбрасываем (ниже — fallback).
-    if (personMask && (personMask.width !== w || personMask.height !== h)) {
-      console.warn('[capture] mask size mismatch', { mask: [personMask.width, personMask.height], frame: [w, h] })
-      personMask = null
-    }
-    if (personMask) {
-      let person = 0
-      const m = personMask.mask
-      for (let i = 0; i < m.length; i++) {
-        const c = m[i]
-        if (c === 2 || c === 3 || c === 4) person++
-      }
-      console.log('[capture] mask', { w, h, personFrac: Math.round((person / m.length) * 1000) / 1000 })
-    } else {
-      console.log('[capture] mask', { w: 0, h: 0, personFrac: 0 })
-    }
-    onCapture({ blob, imageData, canvas, personMask })
+    console.log('[capture] liveContour', {
+      pts: liveContour?.length ?? 0,
+      status: snap?.status ?? 'нет кадров',
+      ageMs: snap ? Date.now() - snap.at : -1
+    })
+    onCapture({ blob, imageData, canvas, liveContour })
   }
 
   async function handleFile(file: File) {
