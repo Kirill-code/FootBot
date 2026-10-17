@@ -42,6 +42,17 @@ export function getPersonSegmentError(): unknown {
   return lastError
 }
 
+// Отладочный хук: прямой доступ к worker-пайплайну из консоли/CDP.
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __footbotDebug: Record<string, unknown> }).__footbotDebug = {
+    getPersonMaskAsync: (...args: unknown[]) => getPersonMaskAsync(args[0] as ImageData),
+    resetSegmentWorker: () => resetSegmentWorker(),
+    subscribePersonSegmentState,
+    getPersonSegmentError: () => String(lastError ?? ''),
+    getState: () => state
+  }
+}
+
 /** Запросы на сброс сегментатора (после ошибок сегментации/зависаний). */
 let segmenterReset: (() => void) | null = null
 
