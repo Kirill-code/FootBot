@@ -256,11 +256,20 @@ export default function ScanPage() {
   }
 
   if (phase === 'analyzing') {
+    // Спокойный линейный прогресс по фазам (без вращающегося спиннера):
+    // модель → фото 1/2 → фото 2/2 (полное заполнение).
+    const phaseProgress = /модель/.test(analyzingView)
+      ? 33
+      : /1\/2/.test(analyzingView)
+        ? 66
+        : 100
     return (
       <main className="page">
         <h1 className="page-title">Анализ фото</h1>
-        <div className="card" style={{ display: 'grid', gap: 14, justifyItems: 'center', padding: '28px 16px' }}>
-          <div className="spinner" aria-label="Анализ идёт" />
+        <div className="card" style={{ display: 'grid', gap: 14, padding: '28px 16px' }}>
+          <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${phaseProgress}%`, background: '#e8c547', transition: 'width 0.4s ease' }} />
+          </div>
           <p className="hint" style={{ margin: 0, textAlign: 'center' }}>{analyzingView || 'Подготовка…'}</p>
           <p className="hint" style={{ margin: 0, textAlign: 'center', color: 'var(--text-dim)' }}>
             Обычно 10–60 секунд, не закрывайте страницу.
@@ -285,13 +294,22 @@ export default function ScanPage() {
               <p style={{ margin: 0, fontWeight: 600 }}>{STEPS[i].title}</p>
               {previews[view] && <img src={previews[view]} alt={STEPS[i].title} style={{ width: '100%', borderRadius: 10 }} />}
               {!fail && m ? (
-                <p className="hint" style={{ color: 'var(--accent)' }}>
-                  {view === 'top'
-                    ? <>Длина <strong>{m.lengthMm} мм</strong> · Ширина <strong>{m.widthMm} мм</strong></>
-                    : m.instepHeightMm !== null
-                      ? <>Высота подъёма <strong>{m.instepHeightMm} мм</strong>{m.lengthMm !== null && <> · Длина (кросс-проверка) {m.lengthMm} мм</>}</>
-                      : <>Подъём: <strong>{Math.round((m.instepRatio ?? 0) * 100)}% длины стопы</strong> (мм посчитаем после объединения с фото сверху)</>}
-                </p>
+                <>
+                  <p className="result-value">
+                    {view === 'top'
+                      ? `${m.lengthMm ?? '—'} мм`
+                      : m.instepHeightMm !== null
+                        ? `${m.instepHeightMm} мм`
+                        : `${Math.round((m.instepRatio ?? 0) * 100)}%`}
+                  </p>
+                  <p className="hint" style={{ color: 'var(--accent)', textAlign: 'center' }}>
+                    {view === 'top'
+                      ? <>Длина <strong>{m.lengthMm} мм</strong> · Ширина <strong>{m.widthMm} мм</strong></>
+                      : m.instepHeightMm !== null
+                        ? <>Высота подъёма <strong>{m.instepHeightMm} мм</strong>{m.lengthMm !== null && <> · Длина (кросс-проверка) {m.lengthMm} мм</>}</>
+                        : <>Подъём: <strong>{Math.round((m.instepRatio ?? 0) * 100)}% длины стопы</strong> (мм посчитаем после объединения с фото сверху)</>}
+                  </p>
+                </>
               ) : (
                 <p className="hint" style={{ color: 'var(--accent)' }}>{fail}</p>
               )}

@@ -94,7 +94,7 @@ const RATIO_TOLERANCE = 0.25
 /** Кандидаты-эталоны: контуры крупнее 3% кадра. */
 const REF_MIN_AREA_FRAC = 0.01
 /** ε approxPolyDP как доля периметра — перебираем несколько. */
-const POLY_EPS_FRACS = [0.01, 0.02, 0.035, 0.05]
+const POLY_EPS_FRACS = [0.01, 0.02, 0.035, 0.05, 0.08]
 /** Минимальная короткая сторона эталона, px (иначе масштаб неточен). */
 const REF_MIN_SHORT_SIDE_PX = 40
 /** Площадь стопы: 1–50% кадра (без эталона — тот же диапазон). */
@@ -157,6 +157,9 @@ interface Quad {
   roi: CvMat | null
   /** Плотность эджей внутри квада: печатный текст (коробка) ≠ чистый лист. */
   internalEdgeDensity: number
+  /** Квад из bright-прохода: лист частично закрыт стопой — допуск ratio шире,
+   * скор ниже (уступает точным Canny-квадам). */
+  fromBright?: boolean
 }
 
 interface ReferenceMatch {
@@ -172,12 +175,26 @@ interface ReferenceMatch {
 /** Сопоставляет квад с ближайшим эталоном. null — не подошёл ни один. */
 function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | null {
   // Печатная поверхность (коробка с текстом, журнал) — не эталон.
-  if (quad.internalEdgeDensity > 0.03) return null
+  if (quad.internalEdgeDensity > 0.03) {
+    dbg?.onInfo?.('ref_reject', { why: 'edgeDensity', d: Math.round(quad.internalEdgeDensity * 1000) / 1000 })
+    return null
+  }
   const sides = sortedSides(quad.pts)
   const shortPx = (sides[0] + sides[1]) / 2
-  if (shortPx < REF_MIN_SHORT_SIDE_PX) return null
+  if (shortPx < REF_MIN_SHORT_SIDE_PX) {
+    dbg?.onInfo?.('ref_reject', { why: 'short', shortPx: Math.round(shortPx) })
+    return null
+  }
   const ratio = sides[3] / sides[0]
   if (sides[0] <= 0) return null
+  // Bright-квады: стопа закрывает часть листа — длинная сторона усечена,
+  // ratio занижен. Широкий допуск ок: печать отсекает density, светлость —
+  // относительный гейт. Скор занижен — точные Canny-квады выигрывают.
+  const tol = quad.fromBright ? 0.35 : RATIO_TOLERANCE
+  if (Math.abs(ratio - 1.414) > tol && Math.abs(ratio - 1.586) > tol) {
+    dbg?.onInfo?.('ref_reject', { why: 'ratio', ratio: Math.round(ratio * 100) / 100 })
+    return null
+  }
 
   // Средняя яркость внутри квада: бумага/карта — светлые.
   let brightness = 0
@@ -189,9 +206,9 @@ function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | n
   let best: ReferenceMatch | null = null
   for (const ref of REFERENCES) {
     const err = Math.abs(ratio - ref.ratio)
-    if (err > RATIO_TOLERANCE) continue
+    if (err > tol) continue
     // Основной критерий — близость ratio; бонусы: точность poly, светлость.
-    let score = RATIO_TOLERANCE - err + (quad.isPoly ? 0.05 : 0)
+    let score = (quad.fromBright ? 0.28 : RATIO_TOLERANCE) - err + (quad.isPoly ? 0.05 : 0)
     if (brightness > 220) score += 0.1
     else if (brightness > 195) score += 0.03
     if (!best || score > best.score) {
@@ -215,7 +232,58 @@ function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | n
   return best
 }
 
-/** Собирает квад-кандидатов из Canny-эджей. */
+/** Квад из minAreaRect (fallback, когда approxPolyDP не сошёлся). */
+function quadFromMinAreaRect(rect: { center: { x: number; y: number }; size: { width: number; height: number }; angle: number }, area: number): Quad | null {
+  const w = rect.size.width
+  const h = rect.size.height
+  if (w <= 0 || h <= 0) return null
+  const angle = (rect.angle * Math.PI) / 180
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const hw = w / 2
+  const hh = h / 2
+  return {
+    pts: [
+      { x: Math.round(rect.center.x - hw * cos + hh * sin), y: Math.round(rect.center.y - hw * sin - hh * cos) },
+      { x: Math.round(rect.center.x + hw * cos + hh * sin), y: Math.round(rect.center.y + hw * sin + hh * cos) },
+      { x: Math.round(rect.center.x + hw * cos - hh * sin), y: Math.round(rect.center.y + hw * sin + hh * cos) },
+      { x: Math.round(rect.center.x - hw * cos - hh * sin), y: Math.round(rect.center.y - hw * sin + hh * cos) }
+    ],
+    areaPx: area,
+    isPoly: false,
+    roi: null,
+    internalEdgeDensity: 0
+  }
+}
+
+/** ROI grayscale + плотность внутренних эджей по bbox квада. */
+function finishQuad(cv: Cv, quad: Quad, gray: CvMat, edges: CvMat, t: MatTracker): void {
+  const xs = quad.pts.map((p) => p.x)
+  const ys = quad.pts.map((p) => p.y)
+  const rx = Math.max(0, Math.min(...xs))
+  const ry = Math.max(0, Math.min(...ys))
+  const rw = Math.min(gray.cols - rx, Math.max(...xs) - rx)
+  const rh = Math.min(gray.rows - ry, Math.max(...ys) - ry)
+  quad.roi = rw > 4 && rh > 4 ? t.track(gray.roi({ x: rx, y: ry, width: rw, height: rh })) : null
+  if (rw > 4 && rh > 4) {
+    const edgesRoi = t.track(edges.roi({ x: rx, y: ry, width: rw, height: rh }))
+    quad.internalEdgeDensity = cv.countNonZero(edgesRoi) / (rw * rh)
+  } else {
+    quad.internalEdgeDensity = 1
+  }
+}
+
+/** approxPolyDP с растущим ε → 4 выпуклые вершины, иначе null. */
+function polyQuad(cv: Cv, cnt: CvMat, peri: number, t: MatTracker): FootContourPoint[] | null {
+  for (const epsFrac of POLY_EPS_FRACS) {
+    const approx = t.track(new cv.Mat())
+    cv.approxPolyDP(cnt, approx, epsFrac * peri, true)
+    if (approx.rows === 4 && cv.isContourConvex(approx)) return contourPoints(approx)
+  }
+  return null
+}
+
+/** Собирает квад-кандидатов из Canny-эджей + bright-прохода. */
 function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: MatTracker): Quad[] {
   // Лёгкий close — заделать микроразрывы краёв (фото шумные).
   const kernel = t.track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3)))
@@ -233,60 +301,61 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
     if (area < frameArea * REF_MIN_AREA_FRAC) continue
 
     const peri = cv.arcLength(cnt, true)
-    let quad: Quad | null = null
-
     // 1) approxPolyDP с растущим ε — ищем ровно 4 вершины.
-    for (const epsFrac of POLY_EPS_FRACS) {
-      const approx = t.track(new cv.Mat())
-      cv.approxPolyDP(cnt, approx, epsFrac * peri, true)
-      if (approx.rows === 4 && cv.isContourConvex(approx)) {
-        quad = { pts: contourPoints(approx), areaPx: area, isPoly: true, roi: null, internalEdgeDensity: 0 }
-        break
+    let pts = polyQuad(cv, cnt, peri, t)
+    let isPoly = pts !== null
+    // 2) Fallback: minAreaRect (грязные края реальной бумаги/карты).
+    if (!pts) {
+      const q = quadFromMinAreaRect(cv.minAreaRect(cnt), area)
+      if (q) {
+        pts = q.pts
+        isPoly = false
       }
     }
+    if (pts) {
+      const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0 }
+      finishQuad(cv, quad, gray, edges, t)
+      quads.push(quad)
+    }
+  }
 
-    // 2) Fallback: minAreaRect (грязные края реальной бумаги/карты).
-    if (!quad) {
-      const rect = cv.minAreaRect(cnt)
-      const w = rect.size.width
-      const h = rect.size.height
-      if (w > 0 && h > 0) {
-        const angle = (rect.angle * Math.PI) / 180
-        const cos = Math.cos(angle)
-        const sin = Math.sin(angle)
-        const hw = w / 2
-        const hh = h / 2
-        quad = {
-          pts: [
-            { x: Math.round(rect.center.x - hw * cos + hh * sin), y: Math.round(rect.center.y - hw * sin - hh * cos) },
-            { x: Math.round(rect.center.x + hw * cos + hh * sin), y: Math.round(rect.center.y + hw * sin - hh * cos) },
-            { x: Math.round(rect.center.x + hw * cos - hh * sin), y: Math.round(rect.center.y + hw * sin + hh * cos) },
-            { x: Math.round(rect.center.x - hw * cos - hh * sin), y: Math.round(rect.center.y - hw * sin + hh * cos) }
-          ],
-          areaPx: area,
-          isPoly: false,
-          roi: null,
-          internalEdgeDensity: 0
+  // --- Bright-pass: у телефонных фото край белого листа на тёплом полу —
+  // слабый широкий градиент, Canny после blur его теряет (phone-top давал
+  // 0 квадов из эджей). Выделяем светлые регионы (относительно среднего
+  // кадра) и строим квады по их внешним контурам. Печатные поверхности
+  // (крышка коробки 12-39-20) отсекает internalEdgeDensity. ---
+  const frameMean = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
+  if (frameMean > 0) {
+    const brightTh = t.track(new cv.Mat())
+    cv.threshold(gray, brightTh, frameMean * 1.28, 255, cv.THRESH_BINARY)
+    // Широкий горизонтальный close: стопа/голень режут лист на две половины
+    // — мост между ними (у мысков полоса узкая). Без этого половинки дают
+    // квады со случайным ratio.
+    const bKernel = t.track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(75, 25)))
+    const bClosed = t.track(new cv.Mat())
+    cv.morphologyEx(brightTh, bClosed, cv.MORPH_CLOSE, bKernel)
+    const bContours = t.track(new cv.MatVector())
+    const bHier = t.track(new cv.Mat())
+    cv.findContours(bClosed, bContours, bHier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    for (let i = 0; i < bContours.size(); i++) {
+      const cnt = t.track(bContours.get(i))
+      const area = cv.contourArea(cnt)
+      if (area < frameArea * REF_MIN_AREA_FRAC) continue
+      const peri = cv.arcLength(cnt, true)
+      let pts = polyQuad(cv, cnt, peri, t)
+      let isPoly = pts !== null
+      if (!pts) {
+        const q = quadFromMinAreaRect(cv.minAreaRect(cnt), area)
+        if (q) {
+          pts = q.pts
+          isPoly = false
         }
       }
-    }
-
-    if (quad) {
-      // ROI grayscale по bbox квада — оценим яркость (бумага светлая).
-      const xs = quad.pts.map((p) => p.x)
-      const ys = quad.pts.map((p) => p.y)
-      const rx = Math.max(0, Math.min(...xs))
-      const ry = Math.max(0, Math.min(...ys))
-      const rw = Math.min(gray.cols - rx, Math.max(...xs) - rx)
-      const rh = Math.min(gray.rows - ry, Math.max(...ys) - ry)
-      quad.roi = rw > 4 && rh > 4 ? t.track(gray.roi({ x: rx, y: ry, width: rw, height: rh })) : null
-      if (rw > 4 && rh > 4) {
-        const edgesRoi = t.track(edges.roi({ x: rx, y: ry, width: rw, height: rh }))
-        quad.internalEdgeDensity = cv.countNonZero(edgesRoi) / (rw * rh)
-      } else {
-        quad.internalEdgeDensity = 1
+      if (pts) {
+        const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0, fromBright: true }
+        finishQuad(cv, quad, gray, edges, t)
+        quads.push(quad)
       }
-      quads.push(quad)
     }
   }
   return quads
@@ -295,6 +364,7 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
 /** Ищет эталон калибровки. null — не найден. */
 function findReference(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: MatTracker, dbg?: FootDebug): ReferenceMatch | null {
   const quads = collectQuads(cv, edges, gray, frameArea, t)
+  dbg?.onInfo?.('ref_quads_total', { quads: quads.length })
   let best: ReferenceMatch | null = null
   for (const quad of quads) {
     const m = matchReference(cv, quad, dbg)
@@ -306,7 +376,7 @@ function findReference(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: 
   // ловит internalEdgeDensity.
   if (best && best.score < 0.3) {
     const frameMean = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
-    if (best.brightness < frameMean * 1.1 + 12) return null
+    if (best.brightness < frameMean * 1.08 + 12) return null
   }
   return best
 }
@@ -344,10 +414,8 @@ let activeRefBounds: { x: number; y: number; w: number; h: number } | null = nul
 /** Пересекается ли контур с зоной эталона. Центроид-проверка — только для
  * блобов близких к размеру эталона: у гигантских блобов (скриншотная рамка,
  * сцена целиком) центроид часто случайно попадает в зону листа. */
-function overlapsReference(cv: Cv, cnt: CvMat, bounds: { x: number; y: number; w: number; h: number }): boolean {
-  const box = cv.boundingRect(cnt)
-  // Точки контура внутри зоны эталона: bbox-перекрытие ненадёжно (тонкое
-  // кольцо стопы рядом с листом имеет большой bbox, но не касается листа).
+/** Доля точек контура внутри зоны эталона (с запасом 10px). */
+function referenceOverlapFraction(_cv: Cv, cnt: CvMat, bounds: { x: number; y: number; w: number; h: number }): number {
   let inside = 0
   for (let i = 0; i < cnt.rows; i++) {
     const p = cnt.intPtr(i, 0) as ArrayLike<number>
@@ -355,7 +423,14 @@ function overlapsReference(cv: Cv, cnt: CvMat, bounds: { x: number; y: number; w
       inside++
     }
   }
-  const frac = cnt.rows > 0 ? inside / cnt.rows : 0
+  return cnt.rows > 0 ? inside / cnt.rows : 0
+}
+
+function overlapsReference(cv: Cv, cnt: CvMat, bounds: { x: number; y: number; w: number; h: number }): boolean {
+  const box = cv.boundingRect(cnt)
+  // Точки контура внутри зоны эталона: bbox-перекрытие ненадёжно (тонкое
+  // кольцо стопы рядом с листом имеет большой bbox, но не касается листа).
+  const frac = referenceOverlapFraction(cv, cnt, bounds)
   if (frac > 0.25 && box.width * box.height < 2.5 * bounds.w * bounds.h) return true
   // Почти весь блоб внутри зоны эталона (сам лист в bright-масках).
   const area = Math.abs(cv.contourArea(cnt))
@@ -459,6 +534,8 @@ let currentGray: CvMat | null = null
 let currentHsv: CvMat | null = null
 /** mm/px эталона (null без эталона) — для стратегии полосы в splitFootFromLeg. */
 let currentMmPerPx: number | null = null
+/** Все кандидаты проходов текущего кадра — для fallback-перебора (side). */
+let allCandidates: FootCandidate[] = []
 
 /** Комплексная оценка кандидата: форма + касание границ + позиция + размер. */
 function rankCandidate(cv: Cv, cnt: CvMat, area: number, touch: number, frameArea: number, frameH: number): number {
@@ -672,10 +749,22 @@ function collectFootCandidates(
       cnt.delete()
       continue
     }
-    if (checkRef && activeRefBounds && overlapsReference(cv, cnt, activeRefBounds)) {
-      skipRef++
-      cnt.delete()
-      continue
+    // Стопа может лежать НА листе (phone-top): её контур целиком внутри зоны
+    // эталона. Глубокое перекрытие (большая доля точек внутри) + размер
+    // меньше эталона → это стопа на листе, НЕ отсекаем. Иначе — старое
+    // поведение: перекрывающие эталон блобы (сам лист) отсекаются.
+    if (checkRef && activeRefBounds) {
+      const refArea = activeRefBounds.w * activeRefBounds.h
+      // «Стопа на листе» (phone-top): только крупные листы (≥8% кадра) —
+      // контур стопы целиком внутри зоны эталона. Карта/мелкий эталон рядом
+      // со стопой — старое поведение (перекрывающие блобы отсекаются).
+      const footOnPaper =
+        refArea > frameArea * 0.08 && referenceOverlapFraction(cv, cnt, activeRefBounds) > 0.55 && area < refArea * 0.8
+      if (!footOnPaper && overlapsReference(cv, cnt, activeRefBounds)) {
+        skipRef++
+        cnt.delete()
+        continue
+      }
     }
     const touch = borderTouchFraction(cnt, srcW, srcH)
     const rank = rankCandidate(cv, cnt, area, touch, frameArea, srcH)
@@ -692,7 +781,7 @@ function collectFootCandidates(
     // а не стопа (носок/кожа тёмные или насыщенные или текстурные). stdV
     // отличает бумагу от яркой босой кожи. Для hole-кандидатов пропускаем:
     // их заливка по построению — яркое нутро (тёмное кольцо на светлом).
-    if (!skipPaperCheck && currentView === 'side' && currentHsv && area > frameArea * 0.05) {
+    if (!skipPaperCheck && currentView === 'side' && currentHsv && area > frameArea * 0.02) {
       const hsvRoi = currentHsv.roi(box)
       const maskRoi = mask.roi(box)
       const mean = cv.mean(hsvRoi, maskRoi) as unknown as ArrayLike<number>
@@ -719,7 +808,10 @@ function collectFootCandidates(
       // солнечная босая стопа — яркий/ненасыщенный/равномерный компактный блоб
       // тоже (extent ~0.83) — по HSV-среднему неотличима от бумаги, ловить её
       // нельзя: весь side-харнесс уходит в регресс. Порог 0.9 — консервативный.
-      const isPaper = mean[2] > 165 && mean[1] < 75 && stdV < 30 && extent > 0.9
+      // Ветка карты: маленький плотный светлый квад (карта рядом/у стопы).
+      const areaPct = (area / frameArea) * 100
+      const isCard = mean[2] > 170 && mean[1] < 80 && extent > 0.85 && areaPct < 12
+      const isPaper = (mean[2] > 165 && mean[1] < 75 && stdV < 30 && extent > 0.9) || isCard
       dbg?.onInfo?.('paper_check', {
         areaPct: Math.round((area / frameArea) * 1000) / 10,
         meanV: Math.round(mean[2]),
@@ -748,6 +840,7 @@ function collectFootCandidates(
   if (dbg && (skipSmall || skipRef || skipGate || skipPaper)) {
     dbg.onInfo?.('collect_skips', { total: contours.size(), small: skipSmall, ref: skipRef, gate: skipGate, paper: skipPaper, gateOn: sizeGateEnabled })
   }
+  allCandidates.push(...out)
   return out
 }
 
@@ -1162,6 +1255,62 @@ function extendHeelAlongAxis(
   return out
 }
 
+/** Геометрия side-кандидата: hull, длина (max pairwise), instepPx и ratio
+ * (высота над МНК-линией пола по нижним 7% bbox / длина). Для fallback-перебора. */
+function sideGeometry(
+  cv: Cv,
+  cand: FootCandidate,
+  t: MatTracker
+): { ratio: number; instepPx: number; lengthPx: number; hullPts: FootContourPoint[] } | null {
+  const hull = t.track(new cv.Mat())
+  cv.convexHull(cand.contour, hull, false, true)
+  const hullPts = contourPoints(hull)
+  if (hullPts.length < 3) return null
+  let lengthPx = 0
+  for (let i = 0; i < hullPts.length; i++) {
+    for (let j = i + 1; j < hullPts.length; j++) {
+      const d = dist(hullPts[i].x, hullPts[i].y, hullPts[j].x, hullPts[j].y)
+      if (d > lengthPx) lengthPx = d
+    }
+  }
+  if (lengthPx <= 0) return null
+  const box = cv.boundingRect(cand.contour)
+  const floorBand = box.y + box.height * 0.93
+  let sx = 0
+  let sy = 0
+  let n = 0
+  for (const p of hullPts) {
+    if (p.y >= floorBand) {
+      sx += p.x
+      sy += p.y
+      n++
+    }
+  }
+  let instepPx = 0
+  if (n >= 3) {
+    const mx = sx / n
+    const my = sy / n
+    let sxy = 0
+    let sxx = 0
+    for (const p of hullPts) {
+      if (p.y >= floorBand) {
+        sxy += (p.x - mx) * (p.y - my)
+        sxx += (p.x - mx) * (p.x - mx)
+      }
+    }
+    const k = sxx > 1 ? sxy / sxx : 0
+    const b = my - k * mx
+    const denom = Math.sqrt(k * k + 1)
+    for (const p of hullPts) {
+      const d = (b + k * p.x - p.y) / denom // >0 выше линии (y вниз)
+      if (d > instepPx) instepPx = d
+    }
+  } else {
+    instepPx = Math.max(...hullPts.map((p) => p.y)) - Math.min(...hullPts.map((p) => p.y))
+  }
+  return { ratio: instepPx / lengthPx, instepPx, lengthPx, hullPts }
+}
+
 /**
  * Измеряет стопу по фото.
  * @returns замер; эталон и стопа ищутся независимо — см. флаги referenceFound/footFound.
@@ -1170,6 +1319,7 @@ function extendHeelAlongAxis(
 export function measureFoot(imageData: ImageData, options?: MeasureOptions, debug?: FootDebug): FootMeasurement {
   const view: FootView = options?.view ?? 'top'
   currentView = view
+  allCandidates = []
   const cv = getOpenCv()
   const t = new MatTracker()
   try {
@@ -1668,42 +1818,32 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       // трапеция, ratio-проверку не проходит. Считаем ОТНОСИТЕЛЬНЫЙ подъём:
       // высота контура над линией пола / длина контура (px). В мм переводит
       // footModel через длину из top-ракурса.
-      const box = cv.boundingRect(foot.contour)
-      const floorBand = box.y + box.height * 0.93
-      let sx = 0
-      let sy = 0
-      let n = 0
-      for (const p of hullPts) {
-        if (p.y >= floorBand) {
-          sx += p.x
-          sy += p.y
-          n++
-        }
-      }
-      let instepPx = 0
-      if (n >= 3) {
-        const mx = sx / n
-        const my = sy / n
-        let sxy = 0
-        let sxx = 0
-        for (const p of hullPts) {
-          if (p.y >= floorBand) {
-            sxy += (p.x - mx) * (p.y - my)
-            sxx += (p.x - mx) * (p.x - mx)
+      let geom = sideGeometry(cv, foot, t)
+      let ratio = geom ? geom.ratio : 0
+      // Fallback: ratio вне 0.08–0.6 — выбранный кандидат, вероятно,
+      // склеен с картой/листом (phone-side__card). Перебираем топ-3 остальных
+      // по рангу и берём первого с правдоподобным подъёмом 0.12–0.5.
+      if (!(ratio >= 0.08 && ratio <= 0.6)) {
+        const alts = allCandidates
+          .filter((c) => c !== foot && c.area >= frameArea * 0.005 && c.area <= frameArea * 0.7)
+          .sort((a, b) => b.rank - a.rank)
+          .slice(0, 3)
+        for (const alt of alts) {
+          const g = sideGeometry(cv, alt, t)
+          debug?.onInfo?.('side_fallback', { rank: Math.round(alt.rank * 100) / 100, areaPct: Math.round((alt.area / frameArea) * 1000) / 10, ratio: g ? Math.round(g.ratio * 1000) / 1000 : null })
+          if (g && g.ratio >= 0.12 && g.ratio <= 0.5) {
+            geom = g
+            ratio = g.ratio
+            // Контура и длина — от принятого альтернативного кандидата.
+            const astep = Math.max(1, Math.floor(g.hullPts.length / 150))
+            empty.footContour = g.hullPts.filter((_, i) => i % astep === 0)
+            lengthPx = g.lengthPx
+            break
           }
         }
-        const k = sxx > 1 ? sxy / sxx : 0
-        const b = my - k * mx
-        const denom = Math.sqrt(k * k + 1)
-        for (const p of hullPts) {
-          const d = (b + k * p.x - p.y) / denom // >0 выше линии (y вниз)
-          if (d > instepPx) instepPx = d
-        }
-      } else {
-        instepPx = Math.max(...hullPts.map((p) => p.y)) - Math.min(...hullPts.map((p) => p.y))
       }
-      const ratio = lengthPx > 0 ? instepPx / lengthPx : 0
-      debug?.onInfo?.('side_debug', { instepPx: Math.round(instepPx), n, ratio: Math.round(ratio * 1000) / 1000 })
+      const instepPx = geom ? geom.instepPx : 0
+      debug?.onInfo?.('side_debug', { instepPx: Math.round(instepPx), ratio: Math.round(ratio * 1000) / 1000 })
       if (ratio >= 0.08 && ratio <= 0.6) {
         empty.instepRatio = Math.round(ratio * 1000) / 1000
       }
