@@ -1,7 +1,9 @@
-// Построение контура из NN-маски без OpenCV: крупнейшая связная
+// Построение контура из бинарной маски без OpenCV: крупнейшая связная
 // компонента → трассировка границы (Moore) → упрощение (Ramer–Douglas–
 // Peucker) → сглаживание. Чистые функции — пригодны для unit-тестов.
-// measureFoot не использует этот модуль (у него свой контурный пайплайн).
+// Источник маски — footMask.ts (цветовая «не бумага» на листе А4).
+// measureFoot не использует этот модуль (у него свой контурный пайплайн
+// на OpenCV — финальный замер по полному кадру).
 
 import type { FootContourPoint } from '../analysis/measureFoot'
 
@@ -230,14 +232,4 @@ export function maskToContour(bin: Uint8Array, w: number, h: number): FootContou
   }
   if (simplified.length > 500) return null
   return smoothPolygon(simplified.length >= 4 ? simplified : pts)
-}
-
-/** Бинарная маска person-классов (2|3|4) из категориальной маски сегментатора. */
-export function personBinFromCategories(mask: Uint8Array): Uint8Array {
-  const out = new Uint8Array(mask.length)
-  for (let i = 0; i < mask.length; i++) {
-    const c = mask[i]
-    if (c === 2 || c === 3 || c === 4) out[i] = 1
-  }
-  return out
 }

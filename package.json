@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@mediapipe/tasks-vision": "^1.1.0",
     "@techstark/opencv-js": "^5.0.0-release.1",
     "dexie": "^4.0.8",
     "dexie-react-hooks": "^1.1.7",

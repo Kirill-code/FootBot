@@ -1,19 +1,14 @@
-// Живой камерный видоискатель с NN-сканированием в реальном времени.
-// Каждые ~350 мс кадр с видео (даунскейл до 640px) сегментируется
-// selfie_multiclass (person-классы), контур силуэта рисуется поверх видео,
-// рамка гайда меняет цвет по статусу позиционирования. OpenCV здесь НЕ
-// используется — только при финальном анализе в ScanPage.
+// Живой камерный видоискатель со сканированием в реальном времени.
+// Каждые ~400 мс кадр с видео (даунскейл до 640px) проходит цветовую
+// сегментацию «стопа на листе А4» (footMask — чистый JS, без NN и без
+// OpenCV в главном потоке), контур силуэта рисуется поверх видео,
+// рамка гайда меняет цвет по статусу позиционирования. OpenCV подключается
+// только при финальном анализе (measureFoot в Web Worker).
 // Fallback: недоступный/запрещённый getUserMedia → старый input capture.
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import type { FootView, FootContourPoint } from '../analysis/measureFoot'
 import type { FootSide } from '../profile/db'
-import {
-  getPersonMaskAsync,
-  resetSegmentWorker,
-  subscribePersonSegmentState,
-  type PersonSegmentState
-} from '../analysis/personSegment'
 
 // Диагностика live-цикла для CDP: число завершённых кадров, время последнего,
 // фаза текущего участка. ОДНА ссылка — setHB мутирует её же (иначе CDP-скрипт
@@ -23,7 +18,8 @@ if (typeof window !== 'undefined') {
   ;(window as unknown as { __scanHB: typeof scanHB }).__scanHB = scanHB
 }
 import { detectLaterality } from '../analysis/footLaterality'
-import { largestComponent, maskToContour, personBinFromCategories } from './liveContour'
+import { largestComponent, maskToContour } from './liveContour'
+import { footBinFromFrame } from './footMask'
 import {
   canonForView,
   deltaMask,
@@ -73,19 +69,17 @@ interface CameraViewProps {
 }
 
 type CameraState = 'starting' | 'live' | 'denied'
-type FrameStatus = 'loading' | 'error' | 'none' | 'partial' | 'ok'
+type FrameStatus = 'loading' | 'none' | 'partial' | 'ok'
 
 const STATUS_COLOR: Record<FrameStatus, string> = {
   loading: '#8a8a8a',
-  error: '#8a8a8a',
   none: '#f87171',
   partial: '#e8c547',
   ok: '#4ade80'
 }
 
 const STATUS_TEXT: Record<FrameStatus, string> = {
-  loading: 'Загрузка модели сегментации…',
-  error: 'Модель недоступна — снимайте по подсказкам',
+  loading: 'Анализ кадра…',
   none: 'Стопа не найдена — наведите рамку на стопу',
   partial: 'Отодвиньте — вся стопа не влезает в кадр',
   ok: 'Стопа в кадре ✓'
@@ -266,7 +260,6 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   const [videoAspect, setVideoAspect] = useState(4 / 3)
   const [camError, setCamError] = useState('')
   const [camAttempt, setCamAttempt] = useState(0) // инкремент = повторный запуск
-  const [nnState, setNnState] = useState<PersonSegmentState>('idle')
   const [status, setStatus] = useState<FrameStatus>('loading')
   const [laterality, setLaterality] = useState<{ side: FootSide; confidence: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -401,10 +394,6 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, camAttempt, view])
 
-  // Подписка на состояние сегментатора: статусы приходят и из worker'а
-  // (live-цикл) и из главно-поточного fallback (финальный анализ).
-  useEffect(() => subscribePersonSegmentState(setNnState), [])
-
   // Состояние камеры наружу (FullScanScreen ждёт 'live' между шагами).
   const onCameraStateRef = useRef(onCameraState)
   onCameraStateRef.current = onCameraState
@@ -478,16 +467,15 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       noVideoCount.current = 0
       busyRef.current = true
       setHB('crop')
-      // Watchdog: segment() может зависнуть ВНУТРИ wasm без исключения.
-      // Сегментация — в worker'е (главный поток свободен), поэтому сторож
-      // отстреливается даже при мёртвом wasm: terminate + пересоздание.
+      // Watchdog на случай патологически медленного кадра: сегментация
+      // синхронная (чистый JS), зависнуть «навсегда» не может, но сторож
+      // страхует от патологий отрисовки/таймеров.
       const watchdog = setTimeout(() => {
         if (stopped) return
         busyRef.current = false
         // Не оставляем застывшую обводку: чистим оверлей, статус «загрузка».
         drawOverlay(null, 'loading')
         setStatus('loading')
-        resetSegmentWorker()
       }, WATCHDOG_MS)
       try {
         const scale = Math.min(1, ANALYSIS_DIM / Math.max(video.videoWidth, video.videoHeight))
@@ -520,20 +508,14 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const cropData = cropCtx.getImageData(0, 0, crw, crh)
 
         setHB('segment')
-        const personMask = await getPersonMaskAsync(cropData)
-        if (stopped) return
-        if (!personMask) {
-          setStatus(nnState === 'error' ? 'error' : 'loading')
-          drawOverlay(null, nnState === 'error' ? 'error' : 'loading')
-          return
-        }
-        setHB('contour')
-        const mw = personMask.width
-        const mh = personMask.height
-        const bin = personBinFromCategories(personMask.mask)
-        // Бумага/лист не должны попадать в силуэт (иначе канон фиттится на
-        // лист) — исключаем paper-like компоненты по яркости/насыщенности.
+        // Цветовая маска «не бумага» (стопа на листе А4) — синхронно,
+        // ~миллисекунды на кропе ≤560px. filterPaperComponents добирает
+        // крупные paper-like компоненты (ламинация, блики на листе).
+        const bin = footBinFromFrame(cropData.data, crw, crh)
+        const mw = crw
+        const mh = crh
         const noPaper = filterPaperComponents(bin, mw, mh, cropData.data)
+        setHB('contour')
         const comp = largestComponent(noPaper, mw, mh)
         const compBin = comp && comp.area >= mw * mh * CROP_MIN_FOOT_FRAC ? comp.bin : null
         // Контур сразу переводим в координаты полного анализ-кадра
@@ -757,8 +739,8 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     }
 
     // Супервизор зависания: нет успешных кадров >10 с (камера жива, вкладка
-    // видима) — красный статус + полный перезапуск (камера + worker
-    // сегментации). Скрытая вкладка кадры не ждёт — ок.
+    // видима) — красный статус + полный перезапуск камеры. Скрытая вкладка
+    // кадры не ждёт — ок.
     lastFrameRef.current = Date.now()
     const superTimer = setInterval(() => {
       if (stopped || document.hidden) return
@@ -766,7 +748,6 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         lastFrameRef.current = Date.now() // дедуп: один перезапуск на эпизод
         setHangs((c) => c + 1)
         stopStream()
-        resetSegmentWorker()
         setCameraState('starting')
         setCamAttempt((n) => n + 1)
       }
@@ -780,11 +761,11 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       clearInterval(superTimer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, cameraState, view, nnState, cycleGen])
+  }, [active, cameraState, view, cycleGen])
 
   // Супервизор: если завершённые кадры не появляются дольше 10 с при живой
   // камере — цикл анализа залип (любая причина): принудительная пересборка
-  // эффекта (свежий interval, сброшенный busy) + пересоздание сегментатора.
+  // эффекта (свежий interval, сброшенный busy).
   useEffect(() => {
     if (!active || cameraState !== 'live') return
     lastDoneRef.current = Date.now()
@@ -795,7 +776,6 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       }
       if (Date.now() - lastDoneRef.current > 10_000) {
         busyRef.current = false
-        resetSegmentWorker()
         drawOverlayRef.current?.(null, 'loading')
         setStatus('loading')
         setHangs((c) => c + 1)
@@ -815,7 +795,6 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     if (Date.now() - lastDoneRef.current > 4000) {
       setHangs((c) => c + 1)
       busyRef.current = false
-      resetSegmentWorker()
       setStatus('loading')
       setCameraState('starting')
       setCamAttempt((n) => n + 1)
@@ -843,7 +822,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       const k = w / snap.frameW
       liveContour = snap.contour.map((p) => ({ x: Math.round(p.x * k), y: Math.round(p.y * k) }))
       // Гард: силуэт гигантский/невалидный (нога+одежда, мебель) — не тащим
-      // в анализ: честный путь через NN-пересегментацию полного кадра.
+      // в анализ: финальный замер пройдёт классическим путём measureFoot.
       const b = contourBBox(liveContour)
       if (liveContour.length > 400 || (b.x1 - b.x0) * (b.y1 - b.y0) > w * h * 0.45) {
         console.warn('[capture] liveContour rejected', { pts: liveContour.length, areaPct: Math.round(((b.x1 - b.x0) * (b.y1 - b.y0)) / (w * h) * 1000) / 10 })
@@ -1036,7 +1015,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       {chrome && (
         <>
           <p className="hint" style={{ margin: 0, color, textAlign: 'center', minHeight: '1.2em' }}>
-            {(status === 'loading' || status === 'error') && (
+            {status === 'loading' && (
               <span style={{ display: 'inline-block', verticalAlign: 'middle', marginRight: 6 }}>
                 <PixelSneakerLoader size={20} />
               </span>

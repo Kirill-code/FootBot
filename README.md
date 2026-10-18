@@ -11,6 +11,8 @@
 - `vite-plugin-pwa` (Workbox, `registerType: 'autoUpdate'`)
 - `dexie` + `dexie-react-hooks` (IndexedDB: фото стоп, замеры)
 - `@techstark/opencv-js` — измерение стопы по фото (ленивый чанк, грузится только при сканировании)
+- Live-контур в видоискателе — цветовая сегментация «стопа на листе А4»
+  (`src/camera/footMask.ts`, чистый JS, без NN-моделей)
 
 ## Команды
 
