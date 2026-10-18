@@ -37,6 +37,7 @@ import PixelSneakerLoader from '../ui/PixelSneakerLoader'
 const ANALYSIS_DIM = 640 // длинная сторона полного анализ-кадра
 const CROP_DIM = 560 // длинная сторона кропа зоны рамки для сегментации
 const CROP_MIN_FOOT_FRAC = 0.005 // <0.5% кропа — стопа не найдена
+const CROP_MAX_FOOT_FRAC = 0.55 // >55% кропа — это фон/сцена целиком, не стопа
 const CAPTURE_DIM = 1600
 const LOOP_MS = 400
 const OPEN_TIMEOUT_MS = 8000 // таймаут открытия камеры (Android-фриз getUserMedia)
@@ -517,7 +518,14 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const noPaper = filterPaperComponents(bin, mw, mh, cropData.data)
         setHB('contour')
         const comp = largestComponent(noPaper, mw, mh)
-        const compBin = comp && comp.area >= mw * mh * CROP_MIN_FOOT_FRAC ? comp.bin : null
+        // Гард по площади: гигантская компонента — это фон, ошибочно ставший
+        // «не фоном» (смешанное кольцо, контрастная сцена). Без гарда контур
+        // рисуется на весь кадр и канон фиттится на сцену.
+        const compArea = comp?.area ?? 0
+        const compBin =
+          comp && compArea >= mw * mh * CROP_MIN_FOOT_FRAC && compArea <= mw * mh * CROP_MAX_FOOT_FRAC
+            ? comp.bin
+            : null
         // Контур сразу переводим в координаты полного анализ-кадра
         // (оверлей масштабирует из них же).
         const contourCrop = compBin ? maskToContour(compBin, mw, mh) : null
