@@ -73,6 +73,19 @@ export default function FullScanScreen({ foot, onFootChange, onClose, onComplete
     }
   }, [])
 
+  // Блокировка ориентации недоступна в обычной вкладке — при повороте/resize
+  // viewport меняется: форсируем перерендер, чтобы layout пересчитался.
+  const [, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight })
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight })
+    window.addEventListener('resize', onResize)
+    window.addEventListener('orientationchange', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('orientationchange', onResize)
+    }
+  }, [])
+
   // Короткий переход между ракурсами — полсекунды.
   useEffect(() => {
     if (stage !== 'transition') return

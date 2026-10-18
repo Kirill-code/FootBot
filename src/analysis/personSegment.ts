@@ -245,17 +245,30 @@ function getSegWorker(): Worker | null {
  * Сегментация в Web Worker (предпочтительно) с откатом на главный поток.
  * Пиксели копируются и передаются transfer'ом — исходный imageData не
  * отсоединяется (вызывающий код использует его дальше, напр. paper-фильтр).
+ * allowMainThreadFallback: false (live-цикл) — при недоступном/зависшем
+ * worker возвращаем null (кадр пропущен, UI не блокируется главно-поточным
+ * wasm); true (analyze) — главно-поточный getPersonMask как последний
+ * резорт ПОСЛЕ worker-таймаута.
  */
-export async function getPersonMaskAsync(imageData: ImageData): Promise<PersonMask | null> {
+export async function getPersonMaskAsync(
+  imageData: ImageData,
+  opts: { allowMainThreadFallback?: boolean } = {}
+): Promise<PersonMask | null> {
+  const allowMainThreadFallback = opts.allowMainThreadFallback ?? true
   const w = getSegWorker()
-  if (!w) return getPersonMask(imageData) // fallback: главный поток
+  if (!w) return allowMainThreadFallback ? getPersonMask(imageData) : null
   return new Promise<PersonMask | null>((resolve) => {
     const id = nextSegId++
     const copy = imageData.data.slice()
     const timer = setTimeout(() => {
       segPending.delete(id)
       resetSegmentWorker()
-      resolve(null)
+      if (allowMainThreadFallback) {
+        // Worker завис — последний резорт: главный поток (только analyze).
+        getPersonMask(imageData).then(resolve, () => resolve(null))
+      } else {
+        resolve(null)
+      }
     }, SEG_TIMEOUT_MS)
     segPending.set(id, { resolve, timer })
     try {

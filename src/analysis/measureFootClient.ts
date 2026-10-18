@@ -1,15 +1,17 @@
 // Клиент Web Worker'а анализа. Лениво создаёт module worker, передаёт
 // пиксели/маску transfer'ом (zero-copy).
-// Сторожа: init-защита 20 с (первый ответ → worker не поднялся → terminate +
-// синхронный fallback на главном потоке) и таймаут 45 с на ракурс (зависший
-// wasm → terminate + reject — ScanPage покажет плашку перезапуска).
-// Если Worker недоступен/упал — откат на старый синхронный путь
-// (OpenCV + measureFoot в главном потоке).
+// Сторожа: init-защита 20 с на ПЕРВЫЙ init сессии и 60 с на re-init после
+// reset (холодный OpenCV может инициализироваться дольше 20 с), плюс таймаут
+// 45 с на ракурс. По init-таймауту workerFailed НЕ выставляется — worker
+// terminate+recreate, текущий запрос reject'ится (ScanPage покажет плашку).
+// workerFailed=true — только при onerror/отсутствии Worker API → синхронный
+// fallback на главном потоке (OpenCV + measureFoot).
 
 import type { FootMeasurement, FootView, PersonMask } from './measureFoot'
 
 const MEASURE_TIMEOUT_MS = 45_000 // на ракурс
-const INIT_TIMEOUT_MS = 20_000 // первый ответ: worker + OpenCV не поднялись
+const INIT_TIMEOUT_MS = 20_000 // первый init сессии: worker + OpenCV не поднялись
+const REINIT_TIMEOUT_MS = 60_000 // re-init после reset: холодный OpenCV может быть >20 с
 
 // window.__scanHB.analyze — точка диагностики зависания анализа (CDP).
 function hbAnalyze(state: string) {
@@ -21,6 +23,9 @@ function hbAnalyze(state: string) {
 let worker: Worker | null = null
 let workerFailed = false
 let workerReady = false
+// Первый init сессии уже прошёл успешно — последующие re-init'ы после reset
+// получают увеличенный таймаут (REINIT_TIMEOUT_MS), а не короткий INIT.
+let hadSuccessfulInit = false
 let nextId = 1
 
 interface Pending {
@@ -80,6 +85,7 @@ function getWorker(): Worker | null {
       pending.delete(id)
       clearTimeout(p.timer)
       workerReady = true
+      hadSuccessfulInit = true
       if (error !== undefined || !result) p.reject(new Error(error || 'Анализ не дал результата'))
       else p.resolve(result)
     }
@@ -115,17 +121,25 @@ export async function measureFootAsync(
   if (!w) return syncFallback(imageData, view, personMask)
   const pm = personMask ?? undefined
   // Первый ответ worker'а (init + OpenCV ~16 МБ): короче лимит — зависший
-  // init не должен выглядеть как «анализ идёт».
-  const timeoutMs = workerReady ? MEASURE_TIMEOUT_MS : INIT_TIMEOUT_MS
+  // init не должен выглядеть как «анализ идёт». После reset (workerReady
+  // сброшен) это re-init, а не первый init: даём REINIT_TIMEOUT_MS.
+  const timeoutMs = workerReady ? MEASURE_TIMEOUT_MS : hadSuccessfulInit ? REINIT_TIMEOUT_MS : INIT_TIMEOUT_MS
   return new Promise<FootMeasurement>((resolve, reject) => {
     const id = nextId++
     const timer = setTimeout(() => {
       pending.delete(id)
       if (!workerReady) {
-        // Init-защита: worker не поднялся за 20 с → навсегда на главный поток.
-        destroyWorker()
-        console.warn('[analyze:worker] init timeout — синхронный fallback')
-        syncFallback(imageData, view, personMask).then(resolve, reject)
+        // Init-таймаут: worker подвис на инициализации. Это НЕ фатальная
+        // недоступность (workerFailed не выставляем): terminate + recreate,
+        // текущий запрос reject — ScanPage покажет плашку с повтором.
+        hbAnalyze('init-timeout')
+        console.warn('[analyze:worker] init timeout — terminate + recreate')
+        resetMeasureWorker()
+        reject(
+          new Error(
+            `Инициализация worker анализа не ответила за ${Math.round(timeoutMs / 1000)} с — worker перезапущен, повторите анализ`
+          )
+        )
         return
       }
       hbAnalyze('timeout')

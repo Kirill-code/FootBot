@@ -29,6 +29,7 @@ export default defineConfig({
         short_name: 'FootBot',
         description: 'Подбор кроссовок по фото стопы',
         display: 'standalone',
+        orientation: 'portrait',
         background_color: '#111111',
         theme_color: '#111111',
         icons: [

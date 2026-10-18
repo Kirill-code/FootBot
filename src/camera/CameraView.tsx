@@ -184,6 +184,39 @@ function drawCardGhost(ctx: CanvasRenderingContext2D, g: GuideRect, corner: Corn
   ctx.restore()
 }
 
+/** Side-ракурс: отрезать голень над строкой максимальной ширины (JS-порт
+ * side-стратегии splitFootFromLeg из measureFoot): иначе PCA по маске
+ * «голень+стопа» даёт вертикальную ось и канон фиттится на голень.
+ * Fail-safe: компонента ниже среза <30% исходной площади → исходная маска. */
+function cutLegForSide(
+  compBin: Uint8Array,
+  w: number,
+  h: number,
+  comp: { x: number; y: number; width: number; height: number; area: number }
+): Uint8Array {
+  const rowW = new Array<number>(comp.height).fill(0)
+  for (let y = 0; y < comp.height; y++) {
+    const row = (comp.y + y) * w
+    for (let x = comp.x; x < comp.x + comp.width; x++) if (compBin[row + x]) rowW[y]++
+  }
+  let maxW = 0
+  let maxIdx = -1
+  for (let y = Math.floor(comp.height * 0.2); y < Math.ceil(comp.height * 0.85); y++) {
+    if (rowW[y] > maxW) {
+      maxW = rowW[y]
+      maxIdx = y
+    }
+  }
+  if (maxIdx < 0) return compBin
+  const cut = new Uint8Array(compBin)
+  for (let y = 0; y < comp.y + maxIdx; y++) {
+    const row = y * w
+    for (let x = comp.x; x < comp.x + comp.width; x++) cut[row + x] = 0
+  }
+  const foot = largestComponent(cut, w, h)
+  return foot && foot.area >= comp.area * 0.3 ? foot.bin : compBin
+}
+
 /** Оверлей по умолчанию (без маски): рамка + пунктирный канон-подсказка.
  * Используется при смене ракурса — чтобы не оставался слепок шага 1. */
 function drawDefaultOverlay(
@@ -207,7 +240,8 @@ function drawDefaultOverlay(
     cx: g.x + g.w / 2,
     cy: g.y + g.h / 2,
     scale: g.h * 0.38,
-    angle: 0,
+    // Side-гайд горизонтален (стопа стоит на полу), не вертикален.
+    angle: cv2 === 'side' ? Math.PI / 2 : 0,
     quality: 0
   }
   const pts = transformCanon(canonForView(cv2), defT)
@@ -520,7 +554,9 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const cropData = cropCtx.getImageData(0, 0, crw, crh)
 
         setHB('segment')
-        const personMask = await getPersonMaskAsync(cropData)
+        // Live-цикл: главно-поточный wasm-fallback запрещён — при недоступном
+        // worker кадр пропускаем, UI и watchdog'и остаются живыми.
+        const personMask = await getPersonMaskAsync(cropData, { allowMainThreadFallback: false })
         if (stopped) return
         if (!personMask) {
           setStatus(nnState === 'error' ? 'error' : 'loading')
@@ -552,7 +588,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         const now = Date.now()
         let canonT: CanonicalTransform | null = null
         if (compBin) {
-          const fitted = fitCanonical(compBin, mw, mh, view === 'side' ? 'side' : 'top')
+          // Side: отрезаем голень (иначе PCA фиттит канон вертикально на
+          // голень); гистерезис угла — от скачков направления на 180°.
+          const fitBin = view === 'side' && comp ? cutLegForSide(compBin, mw, mh, comp) : compBin
+          const fitted = fitCanonical(
+            fitBin,
+            mw,
+            mh,
+            view === 'side' ? 'side' : 'top',
+            canonRef.current?.t.angle,
+            canonRef.current?.lastSeen
+          )
           if (fitted) {
             const prev = canonRef.current
             canonT = prev ? lerpTransform(prev.t, fitted, 0.25) : fitted
@@ -714,7 +760,8 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
           cx: g.x + g.w / 2,
           cy: g.y + g.h / 2,
           scale: g.h * 0.38,
-          angle: 0,
+          // Side-гайд горизонтален (стопа стоит на полу), не вертикален.
+          angle: view === 'side' ? Math.PI / 2 : 0,
           quality: 0
         }
         const pts = transformCanon(canonForView(view === 'side' ? 'side' : 'top'), defT).map((p) => ({ x: p.x * sx, y: p.y * sy }))

@@ -118,7 +118,9 @@ export function fitCanonical(
   bin: Uint8Array,
   w: number,
   h: number,
-  view: 'top' | 'side'
+  view: 'top' | 'side',
+  prevAngle?: number,
+  prevTimestamp?: number
 ): CanonicalTransform | null {
   let n = 0
   let mx = 0
@@ -235,6 +237,21 @@ export function fitCanonical(
     const s0 = scoreDir(angle)
     const s1 = scoreDir(angleFlip)
     if (s1 > s0) angle = angleFlip
+    // Гистерезис направления: при свежем предыдущем фите (<1.5 с) скачок
+    // >75° подозрителен — берём из двух кандидатов тот, что ближе к прошлому
+    // углу (по круговой дистанции). Защита от дёрганья силуэта на 180°.
+    if (prevAngle !== undefined && (prevTimestamp === undefined || Date.now() - prevTimestamp < 1500)) {
+      const circDist = (a: number, b: number): number => {
+        let d = a - b
+        while (d > Math.PI) d -= 2 * Math.PI
+        while (d < -Math.PI) d += 2 * Math.PI
+        return Math.abs(d)
+      }
+      const other = angle + Math.PI
+      if (circDist(angle, prevAngle) > (75 * Math.PI) / 180 && circDist(other, prevAngle) < circDist(angle, prevAngle)) {
+        angle = other
+      }
+    }
   }
   return { cx: mx, cy: my, scale, angle, quality }
 }

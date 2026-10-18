@@ -130,6 +130,7 @@ export default function ScanPage() {
   const [manualSaved, setManualSaved] = useState(false)
   const [nnState, setNnState] = useState<PersonSegmentState>('idle')
   const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const analyzingRef = useRef(false) // reentrancy-гард analyze
   const galleryFixRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => subscribePersonSegmentState(setNnState), [])
@@ -146,6 +147,9 @@ export default function ScanPage() {
   }, [])
 
   async function analyze(shotsOverride?: Partial<Record<FootView, Shot>>) {
+    // Гард от параллельных запусков (handleScanComplete + кнопка + retry).
+    if (analyzingRef.current) return
+    analyzingRef.current = true
     const sh = shotsOverride ?? shots
     setPhase('analyzing')
     setErrorText('')
@@ -157,16 +161,9 @@ export default function ScanPage() {
       await new Promise((r) => setTimeout(r, 30))
     }
     try {
-      // 1. Модель NN-сегментации (~17 МБ, один раз; главный поток, tasks-vision).
-      hbAnalyze('model')
-      let nnOk = false
-      try {
-        await phase('Загружаем модель сегментации (~17 МБ, один раз)…')
-        const { loadPersonSegmenter } = await import('../analysis/personSegment')
-        nnOk = (await loadPersonSegmenter()) !== null
-      } catch {
-        /* классика как fallback */
-      }
+      // Модель NN-сегментации НЕ грузим в главном потоке (wasm compile
+      // блокирует UI): она поднимается в segmentWorker при live-сканировании,
+      // а здесь используется liveContour-маска или worker-путь getPersonMaskAsync.
       const { measureFootAsync } = await import('../analysis/measureFootClient')
       const results: Partial<Record<FootView, FootMeasurement>> = {}
       // 2. Анализ top — в Web Worker: UI живой, OpenCV не блокирует поток.
@@ -178,9 +175,11 @@ export default function ScanPage() {
         // NN-кандидат measureFoot == силуэт, который видел пользователь.
         const personMask = sh.top.liveContour
           ? contourToPersonMask(sh.top.liveContour, sh.top.imageData.width, sh.top.imageData.height)
-          : nnOk
-            ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData)
-            : null
+          : // Worker-путь (SEG_TIMEOUT 20 с, при таймауте — null); главный
+            // поток допустим только как последний резорт после таймаута.
+            await (await import('../analysis/personSegment')).getPersonMaskAsync(sh.top.imageData, {
+              allowMainThreadFallback: true
+            })
         hbAnalyze('segment-done', 'top')
         console.log('[analyze] top', {
           fromLive: !!sh.top.liveContour,
@@ -198,9 +197,9 @@ export default function ScanPage() {
         await phase('Анализируем фото 2/2 (сбоку)…')
         const personMask = sh.side.liveContour
           ? contourToPersonMask(sh.side.liveContour, sh.side.imageData.width, sh.side.imageData.height)
-          : nnOk
-            ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData)
-            : null
+          : await (await import('../analysis/personSegment')).getPersonMaskAsync(sh.side.imageData, {
+              allowMainThreadFallback: true
+            })
         hbAnalyze('segment-done', 'side')
         console.log('[analyze] side', {
           fromLive: !!sh.side.liveContour,
@@ -222,6 +221,8 @@ export default function ScanPage() {
       hbAnalyze('error')
       setAnalysisError(err instanceof Error ? err.message : String(err))
       setAnalyzingView('')
+    } finally {
+      analyzingRef.current = false
     }
   }
 
@@ -378,12 +379,8 @@ export default function ScanPage() {
       )
     }
     // Спокойный линейный прогресс по фазам (без вращающегося спиннера):
-    // модель → фото 1/2 → фото 2/2 (полное заполнение).
-    const phaseProgress = /модель/.test(analyzingView)
-      ? 33
-      : /1\/2/.test(analyzingView)
-        ? 66
-        : 100
+    // старт → фото 1/2 → фото 2/2 (полное заполнение).
+    const phaseProgress = analyzingView === '' ? 5 : /1\/2/.test(analyzingView) ? 50 : 100
     return (
       <main className="page">
         <h1 className="page-title">Анализ фото</h1>

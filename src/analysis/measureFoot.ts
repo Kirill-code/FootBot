@@ -91,8 +91,11 @@ const REFERENCES: ReferenceObject[] = [
 
 /** Допуск по соотношению сторон (перспектива ~15–30°). */
 const RATIO_TOLERANCE = 0.25
-/** Кандидаты-эталоны: контуры крупнее 3% кадра. */
+/** Кандидаты-эталоны: контуры крупнее 1% кадра (лист). */
 const REF_MIN_AREA_FRAC = 0.01
+/** Для квадов с ratio в окне банковской карты (1.586±0.25) порог ниже:
+ *  карта при съёмке с ~1 м занимает ~1% кадра и меньше. */
+const REF_MIN_AREA_FRAC_CARD = 0.003
 /** ε approxPolyDP как доля периметра — перебираем несколько. */
 const POLY_EPS_FRACS = [0.01, 0.02, 0.035, 0.05, 0.08]
 /** Минимальная короткая сторона эталона, px (иначе масштаб неточен). */
@@ -163,6 +166,11 @@ interface Quad {
   /** Сильная геометрия (чистый poly 4 вершины, ratio в допуске, площадь >4%
    * кадра): цвет листа не важен — яркостные гейты пропускаем. */
   geoStrong?: boolean
+  /** Карточный аналог geoStrong: чистый poly, ratio близко к 1.586 —
+   *  тёмную карту яркостный гейт не режет. */
+  cardStrong?: boolean
+  /** Площадь кадра на момент сбора квада (для размерозависимых порогов). */
+  frameArea?: number
 }
 
 interface ReferenceMatch {
@@ -177,8 +185,12 @@ interface ReferenceMatch {
 
 /** Сопоставляет квад с ближайшим эталоном. null — не подошёл ни один. */
 function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | null {
-  // Печатная поверхность (коробка с текстом, журнал) — не эталон.
-  if (quad.internalEdgeDensity > 0.03) {
+  // Печатная поверхность (крышка коробки, журнал) — не эталон. Жёсткий порог
+  // 0.03 — только для квадов размера листа (≥3% кадра): у мелких квадов
+  // (банковская карта) чип/печать дают 0.04–0.12 и это норма.
+  const isSheetSize = quad.frameArea !== undefined && quad.areaPx >= quad.frameArea * 0.03
+  const edgeDensityLimit = isSheetSize ? 0.03 : 0.12
+  if (quad.internalEdgeDensity > edgeDensityLimit) {
     dbg?.onInfo?.('ref_reject', { why: 'edgeDensity', d: Math.round(quad.internalEdgeDensity * 1000) / 1000 })
     return null
   }
@@ -199,6 +211,8 @@ function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | n
     dbg?.onInfo?.('ref_reject', { why: 'ratio', ratio: Math.round(ratio * 100) / 100 })
     return null
   }
+  // Карточный аналог geoStrong: чистый poly с ratio уверенно у карты.
+  if (quad.isPoly && Math.abs(ratio - 1.586) < 0.15) quad.cardStrong = true
 
   // Средняя яркость внутри квада: бумага/карта — светлые.
   let brightness = 0
@@ -302,7 +316,7 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
   for (let i = 0; i < contours.size(); i++) {
     const cnt = t.track(contours.get(i))
     const area = cv.contourArea(cnt)
-    if (area < frameArea * REF_MIN_AREA_FRAC) continue
+    if (area < frameArea * REF_MIN_AREA_FRAC_CARD) continue
 
     const peri = cv.arcLength(cnt, true)
     // 1) approxPolyDP с растущим ε — ищем ровно 4 вершины.
@@ -317,7 +331,13 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
       }
     }
     if (pts) {
-      const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0 }
+      // Двойной порог площади: лист (ratio≈1.414) — ≥1% кадра; карта
+      // (ratio≈1.586) мелкая — ≥0.3% кадра.
+      const sd = sortedSides(pts)
+      const ratio = sd[0] > 0 ? sd[3] / sd[0] : 0
+      const minFrac = Math.abs(ratio - 1.586) < 0.25 ? REF_MIN_AREA_FRAC_CARD : REF_MIN_AREA_FRAC
+      if (area < frameArea * minFrac) continue
+      const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0, frameArea }
       // Сильная геометрия: точный poly, крупный (>4% кадра) — цвет листа
       // не важен, яркостные гейты пропускаем.
       if (isPoly && area > frameArea * 0.04) quad.geoStrong = true
@@ -347,7 +367,7 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
     for (let i = 0; i < bContours.size(); i++) {
       const cnt = t.track(bContours.get(i))
       const area = cv.contourArea(cnt)
-      if (area < frameArea * REF_MIN_AREA_FRAC) continue
+      if (area < frameArea * REF_MIN_AREA_FRAC_CARD) continue
       const peri = cv.arcLength(cnt, true)
       let pts = polyQuad(cv, cnt, peri, t)
       let isPoly = pts !== null
@@ -359,7 +379,12 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
         }
       }
       if (pts) {
-        const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0, fromBright: true }
+        const sd = sortedSides(pts)
+        const ratio = sd[0] > 0 ? sd[3] / sd[0] : 0
+        const cardRatio = Math.abs(ratio - 1.586) < 0.25 && Math.abs(ratio - 1.414) > 0.15
+        const minFrac = cardRatio ? REF_MIN_AREA_FRAC_CARD : REF_MIN_AREA_FRAC
+        if (area < frameArea * minFrac) continue
+        const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0, fromBright: true, frameArea }
         finishQuad(cv, quad, gray, edges, t)
         quads.push(quad)
       }
@@ -383,7 +408,11 @@ function findReference(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: 
   // ловит internalEdgeDensity.
   if (best && best.score < 0.3 && !best.quad.geoStrong) {
     const frameMean = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
-    if (best.brightness < frameMean * 1.08 + 12) return null
+    // cardStrong (чёткий poly-квад с ratio карты) ослабляет гейт: у карты может
+    // быть тёмный пластик, но совсем тёмные мелкие объекты (кошелёк, обложка)
+    // по-прежнему отсекаем — иначе молчаливо неверный mmPerPx.
+    const minBrightness = best.quad.cardStrong ? frameMean * 0.6 : frameMean * 1.08 + 12
+    if (best.brightness < minBrightness) return null
   }
   return best
 }
@@ -817,7 +846,11 @@ function collectFootCandidates(
       // нельзя: весь side-харнесс уходит в регресс. Порог 0.9 — консервативный.
       // Ветка карты: маленький плотный светлый квад (карта рядом/у стопы).
       const areaPct = (area / frameArea) * 100
-      const isCard = mean[2] > 170 && mean[1] < 80 && extent > 0.85 && areaPct < 12
+      // Карта/лист — почти квадрат (1.4–1.6); стопа сбоку вытянута (2.5–4) —
+      // вытянутые блобы из isCard исключаем, чтобы paper-фильтр не резал
+      // светлую босую стопу.
+      const boxAspect = Math.max(box.width, box.height) / Math.max(1, Math.min(box.width, box.height))
+      const isCard = mean[2] > 170 && mean[1] < 80 && extent > 0.85 && areaPct < 12 && boxAspect < 2.2
       const isPaper = (mean[2] > 165 && mean[1] < 75 && stdV < 30 && extent > 0.9) || isCard
       dbg?.onInfo?.('paper_check', {
         areaPct: Math.round((area / frameArea) * 1000) / 10,
@@ -838,8 +871,8 @@ function collectFootCandidates(
     // Высокий блоб с сужением — вероятно «голень+стопа»: сразу пробуем отрезать.
     // Сбоку нога+стопа почти квадратны — пробуем шире (max-width стратегия
     // внутри splitFootFromLeg сама решит, есть где резать).
-    const tallEnough = box.height > 1.3 * box.width || (currentView === 'side' && box.height > 200 && box.width > 150)
-    if (allowSplit && box.height > 200 && tallEnough) {
+    const tallEnough = box.height > 1.3 * box.width || (currentView === 'side' && box.height > 0.12 * srcH && box.width > 0.15 * srcW)
+    if (allowSplit && box.height > 0.12 * srcH && tallEnough) {
       const cut = splitFootFromLeg(cv, cand, srcW, srcH, frameArea, t, dbg)
       if (cut) out.push(cut)
     }
@@ -1263,7 +1296,7 @@ function extendHeelAlongAxis(
 }
 
 /** Геометрия side-кандидата: hull, длина (max pairwise), instepPx и ratio
- * (высота над МНК-линией пола по нижним 7% bbox / длина). Для fallback-перебора. */
+ * (высота над МНК-линией пола по нижним 12% bbox / длина). Для fallback-перебора. */
 function sideGeometry(
   cv: Cv,
   cand: FootCandidate,
@@ -1282,7 +1315,7 @@ function sideGeometry(
   }
   if (lengthPx <= 0) return null
   const box = cv.boundingRect(cand.contour)
-  const floorBand = box.y + box.height * 0.93
+  const floorBand = box.y + box.height * 0.88
   let sx = 0
   let sy = 0
   let n = 0
@@ -1313,7 +1346,18 @@ function sideGeometry(
       if (d > instepPx) instepPx = d
     }
   } else {
-    instepPx = Math.max(...hullPts.map((p) => p.y)) - Math.min(...hullPts.map((p) => p.y))
+    // Hull-точек у самого низа bbox < 3 (голень в маске растягивает bbox).
+    // Полная высота bbox как instep — заведомо плохо. Вместо этого строим
+    // горизонтальную линию пола (k=0) по самой верхней из «глубоких» точек
+    // (y > 85% высоты bbox): стопа стоит на полу, голень выше неё.
+    const deepBand = box.y + box.height * 0.85
+    const deep = hullPts.filter((p) => p.y > deepBand)
+    if (deep.length > 0) {
+      const floorY = Math.min(...deep.map((p) => p.y))
+      instepPx = Math.max(0, floorY - Math.min(...hullPts.map((p) => p.y)))
+    } else {
+      instepPx = Math.max(...hullPts.map((p) => p.y)) - Math.min(...hullPts.map((p) => p.y))
+    }
   }
   return { ratio: instepPx / lengthPx, instepPx, lengthPx, hullPts }
 }
@@ -1702,7 +1746,22 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     if (foot) {
       debug?.onMask('4_foot_raw', foot.mask)
       const cut = splitFootFromLeg(cv, foot, src.cols, src.rows, frameArea, t, debug)
-      if (cut && cut.rank > foot.rank) foot = cut
+      if (cut) {
+        let accept = cut.rank > foot.rank
+        // Side: голень в маске ломает подъём. Если у исходного кандидата
+        // instepRatio вне правдоподобного окна, а у среза внутри — принимаем
+        // срез безусловно, минуя rank.
+        if (!accept && view === 'side') {
+          const gOrig = sideGeometry(cv, foot, t)
+          const gCut = sideGeometry(cv, cut, t)
+          const plausibleInstep = (r: number) => r >= 0.08 && r <= 0.6
+          if (gCut && plausibleInstep(gCut.ratio) && (!gOrig || !plausibleInstep(gOrig.ratio))) {
+            debug?.onInfo?.('split_ratio_accept', { orig: gOrig ? Math.round(gOrig.ratio * 1000) / 1000 : null, cut: Math.round(gCut.ratio * 1000) / 1000 })
+            accept = true
+          }
+        }
+        if (accept) foot = cut
+      }
     }
 
     // Реконструкция: отделяем стопу от слипшихся тёмных объектов.
@@ -1848,7 +1907,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
       let ratio = geom ? geom.ratio : 0
       // Fallback: ratio вне 0.08–0.6 — выбранный кандидат, вероятно,
       // склеен с картой/листом (phone-side__card). Перебираем топ-3 остальных
-      // по рангу и берём первого с правдоподобным подъёмом 0.12–0.5.
+      // по рангу и берём первого с правдоподобным подъёмом (то же окно 0.08–0.6).
       if (!(ratio >= 0.08 && ratio <= 0.6)) {
         const alts = allCandidates
           .filter((c) => c !== foot && c.area >= frameArea * 0.005 && c.area <= frameArea * 0.7)
@@ -1857,7 +1916,7 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
         for (const alt of alts) {
           const g = sideGeometry(cv, alt, t)
           debug?.onInfo?.('side_fallback', { rank: Math.round(alt.rank * 100) / 100, areaPct: Math.round((alt.area / frameArea) * 1000) / 10, ratio: g ? Math.round(g.ratio * 1000) / 1000 : null })
-          if (g && g.ratio >= 0.12 && g.ratio <= 0.5) {
+          if (g && g.ratio >= 0.08 && g.ratio <= 0.6) {
             geom = g
             ratio = g.ratio
             // Контура и длина — от принятого альтернативного кандидата.
