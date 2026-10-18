@@ -160,6 +160,9 @@ interface Quad {
   /** Квад из bright-прохода: лист частично закрыт стопой — допуск ratio шире,
    * скор ниже (уступает точным Canny-квадам). */
   fromBright?: boolean
+  /** Сильная геометрия (чистый poly 4 вершины, ratio в допуске, площадь >4%
+   * кадра): цвет листа не важен — яркостные гейты пропускаем. */
+  geoStrong?: boolean
 }
 
 interface ReferenceMatch {
@@ -190,7 +193,8 @@ function matchReference(cv: Cv, quad: Quad, dbg?: FootDebug): ReferenceMatch | n
   // Bright-квады: стопа закрывает часть листа — длинная сторона усечена,
   // ratio занижен. Широкий допуск ок: печать отсекает density, светлость —
   // относительный гейт. Скор занижен — точные Canny-квады выигрывают.
-  const tol = quad.fromBright ? 0.35 : RATIO_TOLERANCE
+  // Геометрически сильные квады (чистый poly, крупные): цвет листа не важен.
+  const tol = quad.fromBright ? 0.35 : quad.geoStrong ? 0.28 : RATIO_TOLERANCE
   if (Math.abs(ratio - 1.414) > tol && Math.abs(ratio - 1.586) > tol) {
     dbg?.onInfo?.('ref_reject', { why: 'ratio', ratio: Math.round(ratio * 100) / 100 })
     return null
@@ -314,6 +318,9 @@ function collectQuads(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: M
     }
     if (pts) {
       const quad: Quad = { pts, areaPx: area, isPoly, roi: null, internalEdgeDensity: 0 }
+      // Сильная геометрия: точный poly, крупный (>4% кадра) — цвет листа
+      // не важен, яркостные гейты пропускаем.
+      if (isPoly && area > frameArea * 0.04) quad.geoStrong = true
       finishQuad(cv, quad, gray, edges, t)
       quads.push(quad)
     }
@@ -374,7 +381,7 @@ function findReference(cv: Cv, edges: CvMat, gray: CvMat, frameArea: number, t: 
   // (коробка, рама), а не бумага. Абсолютный порог яркости неверен: вечерний
   // свет даёт белый лист brightness ~190. Печатные поверхности дополнительно
   // ловит internalEdgeDensity.
-  if (best && best.score < 0.3) {
+  if (best && best.score < 0.3 && !best.quad.geoStrong) {
     const frameMean = (cv.mean(gray) as unknown as ArrayLike<number>)[0]
     if (best.brightness < frameMean * 1.08 + 12) return null
   }
@@ -1342,7 +1349,26 @@ export function measureFoot(imageData: ImageData, options?: MeasureOptions, debu
     debug?.onMask('1_edges', edges)
 
     // --- Эталон калибровки ---
-    const reference = findReference(cv, edges, blurred, frameArea, t, debug)
+    // Адаптивный Canny ТОЛЬКО для эталона: пороги от медианы gray — край листа
+    // ловится независимо от его цвета (голубой лист на паркете при фикс 50/150
+    // терялся). Остальные проходы продолжают с фикс-эджами (натюнены).
+    const smallMed = t.track(new cv.Mat())
+    cv.resize(blurred, smallMed, { width: 128, height: Math.max(1, Math.round((128 * blurred.rows) / blurred.cols)) }, 0, 0, cv.INTER_AREA)
+    const medN = smallMed.rows * smallMed.cols
+    const medVals: number[] = new Array(medN)
+    for (let y = 0; y < smallMed.rows; y++) {
+      for (let x = 0; x < smallMed.cols; x++) {
+        medVals[y * smallMed.cols + x] = smallMed.ucharPtr(y, x)[0]
+      }
+    }
+    medVals.sort((a, b) => a - b)
+    const med = medVals[medN >> 1] ?? 128
+    const lowTh = Math.max(10, Math.round(0.4 * med))
+    const highTh = Math.min(255, Math.round(1.3 * med))
+    const edgesRef = t.track(new cv.Mat())
+    cv.Canny(blurred, edgesRef, lowTh, highTh)
+    debug?.onInfo?.('ref_canny', { med: Math.round(med), low: lowTh, high: highTh })
+    const reference = findReference(cv, edgesRef, blurred, frameArea, t, debug)
     activeRefBounds = reference ? quadBounds(reference.quad) : null
     currentMmPerPx = reference ? reference.mmPerPx : null
     // Ожидаемая площадь стопы (~265×115 мм, заполнение ~0.65) для ранжирования.

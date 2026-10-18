@@ -203,15 +203,39 @@ export function fitCanonical(
   }
   const meanSNearMin = nNearMin ? sNearMin / nNearMin : 0
   const meanSNearMax = nNearMax ? sNearMax / nNearMax : 0
-  const toesAtMax = meanSNearMax < meanSNearMin
+  let toesAtMax = meanSNearMax < meanSNearMin
   // Канон: пальцы в -Y. R(angle)·(0,-1) = (sin, -cos) — направление на пальцы.
   const toesDx = toesAtMax ? cos : -cos
   const toesDy = toesAtMax ? sin : -sin
-  const angle = Math.atan2(toesDx, -toesDy)
+  let angle = Math.atan2(toesDx, -toesDy)
   const scale = length / 2
   const aspect = width / length
   const canonA = canonAspect(view)
   const quality = Math.max(0, Math.min(1, 1 - Math.abs(aspect - canonA) / canonA))
+  // Side: эвристика «узкий конец» ненадёжна (перевёрнутая нога даёт обратное).
+  // Сравниваем оба направления покрытием маски каноном — берём лучшее.
+  if (view === 'side') {
+    const angleFlip = angle + Math.PI
+    const scoreDir = (a: number): number => {
+      const pts = transformCanon(canonForView('side'), { cx: mx, cy: my, scale, angle: a, quality: 1 })
+      let inside = 0
+      let total = 0
+      const stride = 3
+      for (let y = 0; y < h; y += stride) {
+        const row = y * w
+        for (let x = 0; x < w; x += stride) {
+          if (bin[row + x]) {
+            total++
+            if (pointInPolygon(x, y, pts)) inside++
+          }
+        }
+      }
+      return total > 0 ? inside / total : 0
+    }
+    const s0 = scoreDir(angle)
+    const s1 = scoreDir(angleFlip)
+    if (s1 > s0) angle = angleFlip
+  }
   return { cx: mx, cy: my, scale, angle, quality }
 }
 

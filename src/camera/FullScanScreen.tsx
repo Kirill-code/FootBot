@@ -59,6 +59,20 @@ export default function FullScanScreen({ foot, onFootChange, onClose, onComplete
     [stage, onComplete]
   )
 
+  // Ориентация фиксирована портретом: поворот устройства не должен
+  // переворачивать UI сканирования (кадры/контуры рассинхронизируются).
+  useEffect(() => {
+    const so = (screen as Screen & { orientation?: { lock?: (o: string) => Promise<void>; unlock?: () => void } }).orientation
+    so?.lock?.('portrait').catch(() => undefined) // не везде поддерживается — молча
+    return () => {
+      try {
+        so?.unlock?.()
+      } catch {
+        /* ок */
+      }
+    }
+  }, [])
+
   // Короткий переход между ракурсами — полсекунды.
   useEffect(() => {
     if (stage !== 'transition') return

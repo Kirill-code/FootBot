@@ -149,3 +149,29 @@ describe('deltaMask: гард на гигантский канон', () => {
     expect(deltaMask(bin, w, h, hugeCanon, 4)).toBeNull()
   })
 })
+
+describe('fitCanonical side: ориентация', () => {
+  it('перевёрнутая нога (канон повёрнут на π) → фит выбирает направление на носок', () => {
+    const w = 240
+    const h = 220
+    const angle = Math.PI * 0.93 // носок вверх-влево (нога «вверх ногами»)
+    const bin = makeFootMask('side', 120, 110, 70, angle, w, h)
+    const t = fitCanonical(bin, w, h, 'side')!
+    expect(t).not.toBeNull()
+    // Ось PCA не различает ±π — сравниваем по модулю 2π.
+    let da = Math.abs(t.angle - angle) % (2 * Math.PI)
+    if (da > Math.PI) da = 2 * Math.PI - da
+    expect(da).toBeLessThan(0.35)
+  })
+
+  it('прямая нога (носок вправо) → направление не флипается', () => {
+    const w = 240
+    const h = 220
+    const angle = Math.PI / 2 // носок вправо
+    const bin = makeFootMask('side', 120, 110, 70, angle, w, h)
+    const t = fitCanonical(bin, w, h, 'side')!
+    let da = Math.abs(t.angle - angle) % (2 * Math.PI)
+    if (da > Math.PI) da = 2 * Math.PI - da
+    expect(da).toBeLessThan(0.35)
+  })
+})
