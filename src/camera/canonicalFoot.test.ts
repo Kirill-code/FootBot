@@ -135,3 +135,17 @@ describe('filterPaperComponents', () => {
     expect(out[135 * 200 + 145]).toBe(1)
   })
 })
+
+describe('deltaMask: гард на гигантский канон', () => {
+  it('канон >500 точек → null (только канон рисуется, дельта пропущена)', () => {
+    const w = 100
+    const h = 100
+    const bin = new Uint8Array(w * h)
+    for (let y = 20; y < 80; y++) for (let x = 20; x < 80; x++) bin[y * w + x] = 1
+    const hugeCanon = Array.from({ length: 600 }, (_, i) => {
+      const a = (i / 600) * Math.PI * 2
+      return { x: 50 + 20 * Math.cos(a), y: 50 + 20 * Math.sin(a) }
+    })
+    expect(deltaMask(bin, w, h, hugeCanon, 4)).toBeNull()
+  })
+})

@@ -217,7 +217,18 @@ export function maskToContour(bin: Uint8Array, w: number, h: number): FootContou
     pts = convexHull(all)
   }
   if (pts.length < 6) return null
-  const simplified = simplifyPolygon(pts, Math.max(2, Math.min(w, h) / 180))
+  // Гигантский контур (нога+джинсы целиком — до 37k точек): обязательное
+  // упрощение до бюджета ≤200. Без этого drawOverlay рисует 37k-точечный
+  // path каждый кадр, а delta/laterality получают O(pts) × O(сетка/строки)
+  // — минуты на кадр, «зависание». >500 после упрощения — контур невалиден.
+  let eps = Math.max(2, Math.min(w, h) / 180)
+  let simplified = simplifyPolygon(pts, eps)
+  let guard = 0
+  while (simplified.length > 200 && eps < 3 && guard++ < 8) {
+    eps = Math.min(3, eps * 1.5)
+    simplified = simplifyPolygon(pts, eps)
+  }
+  if (simplified.length > 500) return null
   return smoothPolygon(simplified.length >= 4 ? simplified : pts)
 }
 

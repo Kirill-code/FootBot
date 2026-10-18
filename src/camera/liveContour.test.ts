@@ -53,3 +53,43 @@ describe('liveContour', () => {
     expect([...personBinFromCategories(cats)]).toEqual([0, 0, 1, 1, 1, 0, 1])
   })
 })
+
+describe('maskToContour: защита от гигантских контуров', () => {
+  it('заполненный эллипс 300×500 → ≤200 точек (бюджет RDP)', () => {
+    const w = 400
+    const h = 600
+    const bin = new Uint8Array(w * h)
+    const cx = w / 2
+    const cy = h / 2
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const dx = (x - cx) / 150
+        const dy = (y - cy) / 250
+        if (dx * dx + dy * dy <= 1) bin[y * w + x] = 1
+      }
+    }
+    const c = maskToContour(bin, w, h)!
+    expect(c).not.toBeNull()
+    expect(c.length).toBeLessThanOrEqual(200)
+    // Контур покрывает эллипс по bbox.
+    const xs = c.map((p) => p.x)
+    const ys = c.map((p) => p.y)
+    expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThan(250)
+    expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(400)
+  })
+
+  it('зигзаг-зубчатая граница → после упрощения ≤500 (иначе null)', () => {
+    const w = 400
+    const h = 600
+    const bin = new Uint8Array(w * h)
+    // Эллипс с зубчатым краем (каждый ряд дёргается) — worst case трассировки.
+    for (let y = 50; y < 550; y++) {
+      for (let x = 50; x < 350; x++) {
+        if (y % 4 < 2 || (x + y) % 6 < 3) bin[y * w + x] = 1
+      }
+    }
+    const c = maskToContour(bin, w, h)
+    if (c) expect(c.length).toBeLessThanOrEqual(500)
+    else expect(c).toBeNull()
+  })
+})

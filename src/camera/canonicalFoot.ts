@@ -259,6 +259,9 @@ export interface DeltaGrid {
 }
 
 export function deltaMask(bin: Uint8Array, w: number, h: number, canon: CanonPoint[], step = 4): DeltaGrid | null {
+  // Гард: гигантский полигон делает point-in-polygon по сетке квадратично
+  // дорогим (cells × pts → миллионы) — пропускаем дельту, рисуется только канон.
+  if (canon.length > 500) return null
   let x0 = w
   let y0 = h
   let x1 = 0

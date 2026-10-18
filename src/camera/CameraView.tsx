@@ -633,6 +633,9 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       const { x0, y0, x1, y1 } = contourBBox(contour)
       const area = (x1 - x0) * (y1 - y0)
       if (area / (cw * ch) < CROP_MIN_FOOT_FRAC) return 'none'
+      // Нога+бедро/джинсы целиком: bbox >45% кропа — это не стопа. 'partial'
+      // («отодвиньте») — зелёной рамки и валидного слепка не будет.
+      if (area / (cw * ch) > 0.45) return 'partial'
       const edge = Math.max(cw, ch) * 0.015
       if (x0 <= edge || y0 <= edge || x1 >= cw - edge || y1 >= ch - edge) return 'partial'
       return 'ok'
@@ -839,6 +842,13 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
     if (snap && snap.status === 'ok' && Date.now() - snap.at < 2000 && snap.frameW > 0) {
       const k = w / snap.frameW
       liveContour = snap.contour.map((p) => ({ x: Math.round(p.x * k), y: Math.round(p.y * k) }))
+      // Гард: силуэт гигантский/невалидный (нога+одежда, мебель) — не тащим
+      // в анализ: честный путь через NN-пересегментацию полного кадра.
+      const b = contourBBox(liveContour)
+      if (liveContour.length > 400 || (b.x1 - b.x0) * (b.y1 - b.y0) > w * h * 0.45) {
+        console.warn('[capture] liveContour rejected', { pts: liveContour.length, areaPct: Math.round(((b.x1 - b.x0) * (b.y1 - b.y0)) / (w * h) * 1000) / 10 })
+        liveContour = null
+      }
     }
     console.log('[capture] liveContour', {
       pts: liveContour?.length ?? 0,
