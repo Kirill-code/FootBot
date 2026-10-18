@@ -7,9 +7,10 @@ export default defineConfig({
     exclude: ['node_modules/**', 'dist/**', 'tools/**']
   },
   base: './',
-  // Классические (iife) workers: динамические импорты инлайнятся в чанк
-  // worker'а (opencv 15.5МБ в measureWorker — тот же объём загрузки,
-  // на один запрос меньше).
+  // Классические (iife) workers: tasks-vision в worker грузит wasm-glue
+  // через importScripts — он доступен только в classic workers. Динамические
+  // импорты инлайнятся в чанк worker'а (opencv 15.5МБ в measureWorker — тот
+  // же объём загрузки, на один запрос меньше).
   worker: {
     format: 'iife',
     rollupOptions: {
@@ -39,8 +40,32 @@ export default defineConfig({
       workbox: {
         // OpenCV (~15 МБ) не прекешируем: грузится лениво при первом скане
         // и кешируется runtime-стратегией ниже.
-        globIgnores: ['**/opencv-*.js', '**/measureWorker-*.js'],
+        globIgnores: ['**/opencv-*.js', '**/mediapipe/**', '**/measureWorker-*.js'],
         runtimeCaching: [
+          {
+            // mediapipe wasm — self-hosted в public/, крупные файлы
+            urlPattern: /\/mediapipe\/.*\.(?:js|wasm)$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'mediapipe-wasm',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 * 24 * 30
+              }
+            }
+          },
+          {
+            // Модель NN-сегментации — с CDN Google, 17 МБ, редко меняется
+            urlPattern: /https:\/\/storage\.googleapis\.com\/mediapipe-models\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'nn-model',
+              expiration: {
+                maxEntries: 4,
+                maxAgeSeconds: 60 * 60 * 24 * 30
+              }
+            }
+          },
           {
             // OpenCV.js — тяжёлый ленивый чанк, хеш в имени меняется от сборки к сборке
             urlPattern: /\/assets\/(?:opencv|measureWorker)-[^/]+\.js$/,

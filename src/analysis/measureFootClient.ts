@@ -6,7 +6,7 @@
 // Если Worker недоступен/упал — откат на старый синхронный путь
 // (OpenCV + measureFoot в главном потоке).
 
-import type { FootMeasurement, FootView } from './measureFoot'
+import type { FootMeasurement, FootView, PersonMask } from './measureFoot'
 
 const MEASURE_TIMEOUT_MS = 45_000 // на ракурс
 const INIT_TIMEOUT_MS = 20_000 // первый ответ: worker + OpenCV не поднялись
@@ -90,24 +90,30 @@ function getWorker(): Worker | null {
 }
 
 /** Старый синхронный путь — fallback при недоступности Worker. */
-async function syncFallback(imageData: ImageData, view: FootView): Promise<FootMeasurement> {
+async function syncFallback(
+  imageData: ImageData,
+  view: FootView,
+  personMask: PersonMask | null | undefined
+): Promise<FootMeasurement> {
   const { loadOpenCv } = await import('./opencvLoader')
   const { measureFoot } = await import('./measureFoot')
   await loadOpenCv()
-  return measureFoot(imageData, { view })
+  return measureFoot(imageData, { view, personMask: personMask ?? undefined })
 }
 
 /**
  * Анализ фото в Worker (или синхронно, если Worker недоступен).
- * Пиксели imageData передаются transfer'ом (копией) — исходный буфер
- * у вызывающего кода остаётся нетронутым.
+ * Пиксели imageData передаются transfer'ом — буферы imageData после вызова
+ * отсоединены (используйте canvas/blob из вызывающего кода повторно).
  */
 export async function measureFootAsync(
   imageData: ImageData,
-  view: FootView
+  view: FootView,
+  personMask?: PersonMask | null
 ): Promise<FootMeasurement> {
   const w = getWorker()
-  if (!w) return syncFallback(imageData, view)
+  if (!w) return syncFallback(imageData, view, personMask)
+  const pm = personMask ?? undefined
   // Первый ответ worker'а (init + OpenCV ~16 МБ): короче лимит — зависший
   // init не должен выглядеть как «анализ идёт».
   const timeoutMs = workerReady ? MEASURE_TIMEOUT_MS : INIT_TIMEOUT_MS
@@ -119,7 +125,7 @@ export async function measureFootAsync(
         // Init-защита: worker не поднялся за 20 с → навсегда на главный поток.
         destroyWorker()
         console.warn('[analyze:worker] init timeout — синхронный fallback')
-        syncFallback(imageData, view).then(resolve, reject)
+        syncFallback(imageData, view, personMask).then(resolve, reject)
         return
       }
       hbAnalyze('timeout')
@@ -128,17 +134,21 @@ export async function measureFootAsync(
     }, timeoutMs)
     pending.set(id, { resolve, reject, timer })
     hbAnalyze('sent')
-    // Transfer отсоединяет буферы — копируем, иначе после анализа кадр
-    // вызывающего опустошается и повторный анализ ломался бы.
+    // Transfer отсоединяет буферы — копируем, иначе после анализа кадр/маска
+    // вызывающего опустошаются и повторный анализ ломался бы.
     const imgCopy = new Uint8ClampedArray(imageData.data)
+    const pmCopy = pm ? pm.mask.slice() : undefined
+    const transfers: ArrayBuffer[] = [imgCopy.buffer as ArrayBuffer]
+    if (pmCopy) transfers.push(pmCopy.buffer as ArrayBuffer)
     try {
       w.postMessage(
         {
           id,
           view,
-          imageData: { width: imageData.width, height: imageData.height, data: imgCopy }
+          imageData: { width: imageData.width, height: imageData.height, data: imgCopy },
+          personMask: pm && pmCopy ? { width: pm.width, height: pm.height, mask: pmCopy } : undefined
         },
-        [imgCopy.buffer as ArrayBuffer]
+        transfers
       )
     } catch (e) {
       pending.delete(id)

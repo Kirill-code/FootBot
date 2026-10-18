@@ -1,4 +1,4 @@
-// Модель стопы из замеров по двум ракурсам (top / side).
+// Модель стопы из замеров по трём ракурсам (top / side / front).
 //
 // Пороги volumeHint — по здравому смыслу из анатомических типичных значений:
 //  - instep/length у взрослых ~0.28–0.35: ниже 0.26 — низкий подъём,
@@ -15,14 +15,13 @@ export type VolumeHint = 'low' | 'medium' | 'high'
 
 /** Итоговая модель стопы (все поля nullable — ракурсы можно пропускать). */
 export interface FootModel {
-  /** Длина стопы, мм (из top; иначе кросс-проверка из side). */
+  /** Длина стопы, мм (из top; иначе кросс-проверка из side/front). */
   lengthMm: number | null
   /** Ширина стопы, мм (ракурс top). */
   widthMm: number | null
   /** Высота подъёма, мм (ракурс side). */
   instepHeightMm: number | null
-  /** Ширина переднего отдела, мм. Зарезервировано (ракурс front убран) —
-   *  при сканировании всегда null; может заполняться ручным вводом. */
+  /** Ширина переднего отдела, мм (ракурс front). */
   ballWidthMm: number | null
   /** Отношение ширины к длине (null без пары значений). */
   widthRatio: number | null
@@ -35,6 +34,7 @@ export interface FootModel {
 export interface FootModelInput {
   top?: FootMeasurement | null
   side?: FootMeasurement | null
+  front?: FootMeasurement | null
 }
 
 /** Допуск согласованности длины между ракурсами, мм. */
@@ -49,20 +49,20 @@ function grade(value: number, lowBelow: number, highAbove: number): 0 | 1 | 2 {
 export function buildFootModel(input: FootModelInput): FootModel {
   const top = input.top ?? null
   const side = input.side ?? null
+  const front = input.front ?? null
 
-  // Длина: приоритет top, иначе side (кросс-проверка).
-  const lengthMm = top?.lengthMm ?? side?.lengthMm ?? null
+  // Длина: приоритет top, иначе любой другой ракурс.
+  const lengthMm = top?.lengthMm ?? side?.lengthMm ?? front?.lengthMm ?? null
 
   // Кросс-валидация: расхождение длин ракурсов.
-  const lengths = [top?.lengthMm, side?.lengthMm].filter(
+  const lengths = [top?.lengthMm, side?.lengthMm, front?.lengthMm].filter(
     (v): v is number => typeof v === 'number'
   )
   const inconsistent =
     lengths.length >= 2 && Math.max(...lengths) - Math.min(...lengths) > LENGTH_INCONSISTENCY_MM
 
   const widthMm = top?.widthMm ?? null
-  // ballWidthMm — зарезервировано под ручной ввод; из сканирования не приходит.
-  const ballWidthMm = null
+  const ballWidthMm = front?.ballWidthMm ?? null
 
   // Подъём: приоритет — относительный instepRatio из side × длина из top
   // (side-ракурс эталон не требует). Иначе — готовые мм из side (нужен эталон).

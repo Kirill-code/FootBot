@@ -1,10 +1,11 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
-import type { FootContourPoint, FootMeasurement, FootView } from '../analysis/measureFoot'
+import type { FootContourPoint, FootMeasurement, FootView, PersonMask } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
 import FullScanScreen, { type ScanShots } from './FullScanScreen'
 import ResultSnapshot from './ResultSnapshot'
 import PixelSneakerLoader from '../ui/PixelSneakerLoader'
+import { subscribePersonSegmentState, type PersonSegmentState } from '../analysis/personSegment'
 
 // Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку) в
 // полноэкранном режиме (FullScanScreen), ПОТОМ анализ в Web Worker.
@@ -50,6 +51,24 @@ interface Shot {
   /** Live-силуэт момента съёмки (координаты кадра съёмки) — единый источник
    * истины слепка и маски анализа. null/undefined — не зафиксирован. */
   liveContour?: FootContourPoint[] | null
+}
+
+/** Live-контур → маска классов в размере кадра (person=класс 2), для NN-прохода
+ * measureFoot. Растеризация canvas-заливкой — один раз на ракурс, дёшево. */
+function contourToPersonMask(contour: FootContourPoint[], w: number, h: number): PersonMask {
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const ctx = c.getContext('2d')!
+  ctx.beginPath()
+  contour.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)))
+  ctx.closePath()
+  ctx.fillStyle = '#fff'
+  ctx.fill()
+  const rgba = ctx.getImageData(0, 0, w, h).data
+  const mask = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) if (rgba[i * 4] > 127) mask[i] = 2
+  return { mask, width: w, height: h }
 }
 
 /** fileToImageData и canvasToBlob переехали в ./imageIO (общие с CameraView). */
@@ -109,8 +128,11 @@ export default function ScanPage() {
   const [manualOpen, setManualOpen] = useState(false)
   const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
+  const [nnState, setNnState] = useState<PersonSegmentState>('idle')
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const galleryFixRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => subscribePersonSegmentState(setNnState), [])
 
   /** Полный цикл FullScanScreen завершён — оборачиваем в Shot и уходим в анализ. */
   const handleScanComplete = useCallback((raw: ScanShots) => {
@@ -135,31 +157,60 @@ export default function ScanPage() {
       await new Promise((r) => setTimeout(r, 30))
     }
     try {
-      // 1. Анализ — только OpenCV (ленивый чанк, Web Worker): UI живой.
+      // 1. Модель NN-сегментации (~17 МБ, один раз; главный поток, tasks-vision).
+      hbAnalyze('model')
+      let nnOk = false
+      try {
+        await phase('Загружаем модель сегментации (~17 МБ, один раз)…')
+        const { loadPersonSegmenter } = await import('../analysis/personSegment')
+        nnOk = (await loadPersonSegmenter()) !== null
+      } catch {
+        /* классика как fallback */
+      }
       const { measureFootAsync } = await import('../analysis/measureFootClient')
       const results: Partial<Record<FootView, FootMeasurement>> = {}
-      // 2. Анализ top — в Web Worker: OpenCV не блокирует поток.
+      // 2. Анализ top — в Web Worker: UI живой, OpenCV не блокирует поток.
+      // Маска из capture (те же данные, что видел live); при её отсутупи —
+      // сегментируем полный кадр здесь (прежний fallback).
       if (sh.top) {
         await phase('Анализируем фото 1/2 (сверху)…')
+        // Единый источник истины: live-силуэт съёмки растрируется в маску —
+        // NN-кандидат measureFoot == силуэт, который видел пользователь.
+        const personMask = sh.top.liveContour
+          ? contourToPersonMask(sh.top.liveContour, sh.top.imageData.width, sh.top.imageData.height)
+          : nnOk
+            ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData)
+            : null
         hbAnalyze('segment-done', 'top')
         console.log('[analyze] top', {
           fromLive: !!sh.top.liveContour,
+          hasMask: !!personMask,
+          maskW: personMask?.width ?? 0,
+          maskH: personMask?.height ?? 0,
           frameW: sh.top.imageData.width,
           frameH: sh.top.imageData.height
         })
-        const m = await measureFootAsync(sh.top.imageData, 'top')
+        const m = await measureFootAsync(sh.top.imageData, 'top', personMask)
         results.top = m
       }
       // 3. Анализ side.
       if (sh.side) {
         await phase('Анализируем фото 2/2 (сбоку)…')
+        const personMask = sh.side.liveContour
+          ? contourToPersonMask(sh.side.liveContour, sh.side.imageData.width, sh.side.imageData.height)
+          : nnOk
+            ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData)
+            : null
         hbAnalyze('segment-done', 'side')
         console.log('[analyze] side', {
           fromLive: !!sh.side.liveContour,
+          hasMask: !!personMask,
+          maskW: personMask?.width ?? 0,
+          maskH: personMask?.height ?? 0,
           frameW: sh.side.imageData.width,
           frameH: sh.side.imageData.height
         })
-        const m = await measureFootAsync(sh.side.imageData, 'side')
+        const m = await measureFootAsync(sh.side.imageData, 'side', personMask)
         results.side = m
       }
       await phase('Строим модель стопы…')
@@ -327,14 +378,12 @@ export default function ScanPage() {
       )
     }
     // Спокойный линейный прогресс по фазам (без вращающегося спиннера):
-    // старт → фото 1/2 → фото 2/2 → сборка модели (почти полное заполнение).
-    const phaseProgress = /1\/2/.test(analyzingView)
-      ? 40
-      : /2\/2/.test(analyzingView)
-        ? 80
-        : /модель/.test(analyzingView)
-          ? 95
-          : 10
+    // модель → фото 1/2 → фото 2/2 (полное заполнение).
+    const phaseProgress = /модель/.test(analyzingView)
+      ? 33
+      : /1\/2/.test(analyzingView)
+        ? 66
+        : 100
     return (
       <main className="page">
         <h1 className="page-title">Анализ фото</h1>
@@ -403,6 +452,14 @@ export default function ScanPage() {
             </div>
           )
         })}
+
+        {(analysis.top?.sockDetected || analysis.side?.sockDetected) && (
+          <div className="card">
+            <p className="hint" style={{ color: '#e8c547' }}>
+              Похоже, на стопе носок — для точного подбора снимите носки и переснимите.
+            </p>
+          </div>
+        )}
 
         {errorText && (
           <div className="card">
@@ -490,6 +547,12 @@ export default function ScanPage() {
       <button className="btn btn-block" onClick={() => setScanOpen(true)}>
         Начать сканирование
       </button>
+      {nnState === 'loading' && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+          <PixelSneakerLoader size={24} />
+          <span className="hint">Готовим модель анализа…</span>
+        </div>
+      )}
 
       {shots.top && shots.side && (
         <button className="btn btn-secondary btn-block" onClick={() => analyze()}>

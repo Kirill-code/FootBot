@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { largestComponent, maskToContour, simplifyPolygon } from './liveContour'
+import { largestComponent, maskToContour, personBinFromCategories, simplifyPolygon } from './liveContour'
 
 function rectMask(w: number, h: number, x0: number, y0: number, rw: number, rh: number): Uint8Array {
   const m = new Uint8Array(w * h)
@@ -46,6 +46,11 @@ describe('liveContour', () => {
     const line = Array.from({ length: 20 }, (_, i) => ({ x: i, y: 5 }))
     const s = simplifyPolygon(line, 1.5)
     expect(s.length).toBeLessThanOrEqual(3)
+  })
+
+  it('personBinFromCategories берёт только 2|3|4', () => {
+    const cats = new Uint8Array([0, 1, 2, 3, 4, 5, 2])
+    expect([...personBinFromCategories(cats)]).toEqual([0, 0, 1, 1, 1, 0, 1])
   })
 })
 
