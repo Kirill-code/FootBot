@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
 import type { FootContourPoint, FootMeasurement, FootView, PersonMask } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
@@ -91,6 +91,18 @@ function drawPreview(canvas: HTMLCanvasElement, contour?: FootContourPoint[]): s
   return preview.toDataURL('image/jpeg', 0.85)
 }
 
+// window.__scanHB.analyze — точка диагностики зависания анализа (CDP).
+function hbAnalyze(state: string, view?: string) {
+  const w = window as unknown as {
+    __scanHB?: { analyze?: { view?: string; t0: number; state: string; at: number } }
+  }
+  const hb = (w.__scanHB ??= {} as never) as {
+    analyze?: { view?: string; t0: number; state: string; at: number }
+  }
+  const prev = hb.analyze
+  hb.analyze = { view: view ?? prev?.view, t0: prev?.t0 ?? Date.now(), state, at: Date.now() }
+}
+
 /** Есть ли по ракурсу целевая метрика. */
 function viewMeasured(m: FootMeasurement | undefined, view: FootView): boolean {
   if (!m) return false
@@ -117,6 +129,8 @@ export default function ScanPage() {
   const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
   const [nnState, setNnState] = useState<PersonSegmentState>('idle')
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const galleryFixRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => subscribePersonSegmentState(setNnState), [])
 
@@ -135,6 +149,8 @@ export default function ScanPage() {
     const sh = shotsOverride ?? shots
     setPhase('analyzing')
     setErrorText('')
+    setAnalysisError(null)
+    hbAnalyze('start', 'top')
     // Смена подписи + пауза, чтобы UI успел отрисоваться перед тяжёлым шагом.
     const phase = async (label: string) => {
       setAnalyzingView(label)
@@ -142,6 +158,7 @@ export default function ScanPage() {
     }
     try {
       // 1. Модель NN-сегментации (~17 МБ, один раз; главный поток, tasks-vision).
+      hbAnalyze('model')
       let nnOk = false
       try {
         await phase('Загружаем модель сегментации (~17 МБ, один раз)…')
@@ -164,6 +181,7 @@ export default function ScanPage() {
           : nnOk
             ? await (await import('../analysis/personSegment')).getPersonMask(sh.top.imageData)
             : null
+        hbAnalyze('segment-done', 'top')
         console.log('[analyze] top', {
           fromLive: !!sh.top.liveContour,
           hasMask: !!personMask,
@@ -183,6 +201,7 @@ export default function ScanPage() {
           : nnOk
             ? await (await import('../analysis/personSegment')).getPersonMask(sh.side.imageData)
             : null
+        hbAnalyze('segment-done', 'side')
         console.log('[analyze] side', {
           fromLive: !!sh.side.liveContour,
           hasMask: !!personMask,
@@ -195,12 +214,31 @@ export default function ScanPage() {
         results.side = m
       }
       await phase('Строим модель стопы…')
+      hbAnalyze('done')
       setAnalysis(results)
       setPhase('results')
     } catch (err) {
-      setErrorText(err instanceof Error ? err.message : String(err))
-      setPhase('collect')
+      // НЕ уходим в results и НЕ теряем shots: плашка с повтором/галереей.
+      hbAnalyze('error')
+      setAnalysisError(err instanceof Error ? err.message : String(err))
+      setAnalyzingView('')
     }
+  }
+
+  /** Повторный анализ тех же шотов (зависший worker уже сброшен клиентом). */
+  function retryAnalysis() {
+    void analyze()
+  }
+
+  /** Галерея как запасной путь при зависшем анализе: фото заменяет top-шот. */
+  async function handleGalleryFix(file: File) {
+    setAnalysisError(null)
+    const { fileToImageData, canvasToBlob } = await import('./imageIO')
+    const { imageData, canvas } = await fileToImageData(file, 1600)
+    const blob = await canvasToBlob(canvas)
+    const shot: Shot = { blob, previewUrl: drawPreview(canvas), imageData, canvas, liveContour: null }
+    setShots((prev) => ({ ...prev, top: shot }))
+    setPhase('collect')
   }
 
   function retake(view: FootView) {
@@ -306,6 +344,39 @@ export default function ScanPage() {
   }
 
   if (phase === 'analyzing') {
+    if (analysisError) {
+      return (
+        <main className="page">
+          <h1 className="page-title">Анализ фото</h1>
+          <div className="card" style={{ borderColor: '#f87171', display: 'grid', gap: 12 }}>
+            <p className="hint" style={{ color: '#f87171', margin: 0, fontWeight: 600 }}>
+              Анализ завис. Фото остались — попробуйте ещё раз или выберите из галереи.
+            </p>
+            <p className="hint" style={{ margin: 0, color: 'var(--text-dim)' }}>{analysisError}</p>
+            <button className="btn btn-block" onClick={retryAnalysis}>
+              Повторить анализ
+            </button>
+            <button className="btn btn-secondary btn-block" onClick={() => galleryFixRef.current?.click()}>
+              Выбрать из галереи
+            </button>
+            <button className="btn btn-secondary btn-block" onClick={() => { setAnalysisError(null); setPhase('collect') }}>
+              Назад к съёмке
+            </button>
+            <input
+              ref={galleryFixRef}
+              type="file"
+              accept="image/*"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                e.target.value = ''
+                if (f) void handleGalleryFix(f)
+              }}
+            />
+          </div>
+        </main>
+      )
+    }
     // Спокойный линейный прогресс по фазам (без вращающегося спиннера):
     // модель → фото 1/2 → фото 2/2 (полное заполнение).
     const phaseProgress = /модель/.test(analyzingView)

@@ -1,14 +1,26 @@
 // Клиент Web Worker'а анализа. Лениво создаёт module worker, передаёт
-// пиксели/маску transfer'ом (zero-copy), по таймауту 90 с → reject.
+// пиксели/маску transfer'ом (zero-copy).
+// Сторожа: init-защита 20 с (первый ответ → worker не поднялся → terminate +
+// синхронный fallback на главном потоке) и таймаут 45 с на ракурс (зависший
+// wasm → terminate + reject — ScanPage покажет плашку перезапуска).
 // Если Worker недоступен/упал — откат на старый синхронный путь
 // (OpenCV + measureFoot в главном потоке).
 
 import type { FootMeasurement, FootView, PersonMask } from './measureFoot'
 
-const TIMEOUT_MS = 90_000
+const MEASURE_TIMEOUT_MS = 45_000 // на ракурс
+const INIT_TIMEOUT_MS = 20_000 // первый ответ: worker + OpenCV не поднялись
+
+// window.__scanHB.analyze — точка диагностики зависания анализа (CDP).
+function hbAnalyze(state: string) {
+  const w = window as unknown as { __scanHB?: { analyze?: { state: string; at: number } } }
+  const hb = (w.__scanHB ??= {} as never) as { analyze?: { state: string; at: number } }
+  hb.analyze = { state, at: Date.now() }
+}
 
 let worker: Worker | null = null
 let workerFailed = false
+let workerReady = false
 let nextId = 1
 
 interface Pending {
@@ -29,8 +41,20 @@ function failAllPending(e: Error) {
 function destroyWorker() {
   worker?.terminate()
   worker = null
+  workerReady = false
   workerFailed = true
   failAllPending(new Error('Worker анализа недоступен'))
+}
+
+/** Сторож зависания анализа (таймаут ракурса): убить worker — следующий
+ * вызов пересоздаст. workerFailed НЕ выставляется: это не фатальная
+ * недоступность, а подвисший прогон. */
+export function resetMeasureWorker(): void {
+  worker?.terminate()
+  worker = null
+  workerReady = false
+  failAllPending(new Error('Анализ завис (таймаут 45 с)'))
+  console.warn('[analyze:worker] resetMeasureWorker: terminate + recreate')
 }
 
 function getWorker(): Worker | null {
@@ -43,11 +67,19 @@ function getWorker(): Worker | null {
       return null
     }
     worker.onmessage = (e: MessageEvent) => {
-      const { id, result, error } = e.data as { id: number; result?: FootMeasurement; error?: string }
+      const data = e.data as { id: number; result?: FootMeasurement; error?: string; progress?: string }
+      if (data.progress !== undefined) {
+        // Точки прогресса worker'а — в CDP видно, где виснет.
+        console.log(`[analyze:worker] ${data.progress}`)
+        hbAnalyze(`worker:${data.progress}`)
+        return
+      }
+      const { id, result, error } = data
       const p = pending.get(id)
       if (!p) return
       pending.delete(id)
       clearTimeout(p.timer)
+      workerReady = true
       if (error !== undefined || !result) p.reject(new Error(error || 'Анализ не дал результата'))
       else p.resolve(result)
     }
@@ -82,13 +114,26 @@ export async function measureFootAsync(
   const w = getWorker()
   if (!w) return syncFallback(imageData, view, personMask)
   const pm = personMask ?? undefined
+  // Первый ответ worker'а (init + OpenCV ~16 МБ): короче лимит — зависший
+  // init не должен выглядеть как «анализ идёт».
+  const timeoutMs = workerReady ? MEASURE_TIMEOUT_MS : INIT_TIMEOUT_MS
   return new Promise<FootMeasurement>((resolve, reject) => {
     const id = nextId++
     const timer = setTimeout(() => {
       pending.delete(id)
-      reject(new Error('Анализ занял больше 90 секунд — попробуйте переснять при лучшем освещении'))
-    }, TIMEOUT_MS)
+      if (!workerReady) {
+        // Init-защита: worker не поднялся за 20 с → навсегда на главный поток.
+        destroyWorker()
+        console.warn('[analyze:worker] init timeout — синхронный fallback')
+        syncFallback(imageData, view, personMask).then(resolve, reject)
+        return
+      }
+      hbAnalyze('timeout')
+      resetMeasureWorker()
+      reject(new Error('Анализ завис (таймаут 45 с)'))
+    }, timeoutMs)
     pending.set(id, { resolve, reject, timer })
+    hbAnalyze('sent')
     // Transfer отсоединяет буферы — копируем, иначе после анализа кадр/маска
     // вызывающего опустошаются и повторный анализ ломался бы.
     const imgCopy = new Uint8ClampedArray(imageData.data)

@@ -29,8 +29,12 @@ const ctx = self as unknown as Worker
 
 ctx.onmessage = async (e: MessageEvent<MeasureRequest>) => {
   const { id, view, imageData, personMask } = e.data
+  const t0 = Date.now()
+  const progress = (state: string) => ctx.postMessage({ id, progress: state })
   try {
+    progress('init-ok')
     await ensureReady()
+    progress('opencv-ready')
     const pm: PersonMask | undefined = personMask
       ? { mask: personMask.mask, width: personMask.width, height: personMask.height }
       : undefined
@@ -39,6 +43,7 @@ ctx.onmessage = async (e: MessageEvent<MeasureRequest>) => {
       view,
       personMask: pm
     })
+    progress(`measure-done ${Date.now() - t0}`)
     ctx.postMessage({ id, result })
   } catch (err) {
     ctx.postMessage({ id, error: err instanceof Error ? err.message : String(err) })
