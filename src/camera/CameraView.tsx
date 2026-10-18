@@ -18,7 +18,7 @@ import {
 // Диагностика live-цикла для CDP: число завершённых кадров, время последнего,
 // фаза текущего участка. ОДНА ссылка — setHB мутирует её же (иначе CDP-скрипт
 // и внутренние счётчики смотрели бы на разные объекты).
-const scanHB = { done: 0, last: 0, phase: 'init', phaseT: 0 }
+const scanHB = { done: 0, last: 0, phase: 'init', phaseT: 0, error: '' }
 if (typeof window !== 'undefined') {
   ;(window as unknown as { __scanHB: typeof scanHB }).__scanHB = scanHB
 }
@@ -36,6 +36,7 @@ import {
   type DeltaGrid
 } from './canonicalFoot'
 import { canvasToBlob, fileToImageData } from './imageIO'
+import PixelSneakerLoader from '../ui/PixelSneakerLoader'
 
 const ANALYSIS_DIM = 640 // длинная сторона полного анализ-кадра
 const CROP_DIM = 560 // длинная сторона кропа зоны рамки для сегментации
@@ -261,6 +262,7 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   const streamRef = useRef<MediaStream | null>(null)
   const busyRef = useRef(false)
   const [cameraState, setCameraState] = useState<CameraState>('starting')
+  const [capturing, setCapturing] = useState(false)
   const [videoAspect, setVideoAspect] = useState(4 / 3)
   const [camError, setCamError] = useState('')
   const [camAttempt, setCamAttempt] = useState(0) // инкремент = повторный запуск
@@ -609,14 +611,17 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
         } else if (view !== 'top' || next !== 'ok') {
           setLaterality(null)
         }
-      } catch {
+      } catch (e) {
+        // CDP-отладка: текст последнего исключения фазы (зависание — в HB).
+        scanHB.error = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
         /* кадр пропущен — следующий через LOOP_MS */
       } finally {
+        // выполняется ВСЕГДА: фазы помечаются до await-точек, счётчик живёт
+        // даже при исключении в drawOverlay.
         clearTimeout(watchdog)
         busyRef.current = false
         lastDoneRef.current = Date.now()
-        scanHB.done++
-        scanHB.last = Date.now()
+        setHB('done', true)
       }
     }
 
@@ -802,16 +807,29 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
   async function capture() {
     const video = videoRef.current
     if (!video || !video.videoWidth) return
-    const scale = Math.min(1, CAPTURE_DIM / Math.max(video.videoWidth, video.videoHeight))
-    const w = Math.max(1, Math.round(video.videoWidth * scale))
-    const h = Math.max(1, Math.round(video.videoHeight * scale))
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    const ctx = canvas.getContext('2d')!
-    ctx.drawImage(video, 0, 0, w, h)
-    const imageData = ctx.getImageData(0, 0, w, h)
-    const blob = await canvasToBlob(canvas)
+    // Залепший цикл (нет кадров >4 с): не снимать по протухшему liveContour —
+    // видимый статус + процедура перезапуска, как у супервизора.
+    if (Date.now() - lastDoneRef.current > 4000) {
+      setHangs((c) => c + 1)
+      busyRef.current = false
+      resetSegmentWorker()
+      setStatus('loading')
+      setCameraState('starting')
+      setCamAttempt((n) => n + 1)
+      return
+    }
+    setCapturing(true)
+    try {
+      const scale = Math.min(1, CAPTURE_DIM / Math.max(video.videoWidth, video.videoHeight))
+      const w = Math.max(1, Math.round(video.videoWidth * scale))
+      const h = Math.max(1, Math.round(video.videoHeight * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(video, 0, 0, w, h)
+      const imageData = ctx.getImageData(0, 0, w, h)
+      const blob = await canvasToBlob(canvas)
     // Слепок — live-силуэт, который пользователь ВИДЕЛ при спуске (статус 'ok',
     // свежесть <2 с). Пересегментация полного кадра убрана: другой вход NN
     // давал другую маску и лишние 1–3 с после нажатия. Координаты: 640-кадр →
@@ -828,12 +846,20 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       ageMs: snap ? Date.now() - snap.at : -1
     })
     onCapture({ blob, imageData, canvas, liveContour })
+    } finally {
+      setCapturing(false)
+    }
   }
 
   async function handleFile(file: File) {
-    const { imageData, canvas } = await fileToImageData(file, CAPTURE_DIM)
-    const blob = await canvasToBlob(canvas)
-    onCapture({ blob, imageData, canvas })
+    setCapturing(true)
+    try {
+      const { imageData, canvas } = await fileToImageData(file, CAPTURE_DIM)
+      const blob = await canvasToBlob(canvas)
+      onCapture({ blob, imageData, canvas })
+    } finally {
+      setCapturing(false)
+    }
   }
 
   // Внешний доступ к спуску/галерее (кастомная кнопка спуска родителя).
@@ -944,10 +970,24 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
               inset: 0,
               display: 'grid',
               placeItems: 'center',
-              color: 'var(--text-dim)'
+              color: 'var(--text-dim)',
+              background: 'rgba(0,0,0,0.35)'
             }}
           >
-            Запуск камеры…
+            <PixelSneakerLoader size={72} text="Запуск камеры…" />
+          </div>
+        )}
+        {capturing && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'grid',
+              placeItems: 'center',
+              background: 'rgba(0,0,0,0.55)'
+            }}
+          >
+            <PixelSneakerLoader size={64} text="Сохраняем кадр…" />
           </div>
         )}
         {!active && cameraState === 'live' && (
@@ -986,6 +1026,11 @@ export default function CameraView({ view, onCapture, foot, onFootGuess, active 
       {chrome && (
         <>
           <p className="hint" style={{ margin: 0, color, textAlign: 'center', minHeight: '1.2em' }}>
+            {(status === 'loading' || status === 'error') && (
+              <span style={{ display: 'inline-block', verticalAlign: 'middle', marginRight: 6 }}>
+                <PixelSneakerLoader size={20} />
+              </span>
+            )}
             {hintText}
           </p>
 

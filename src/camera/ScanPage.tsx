@@ -1,9 +1,11 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { db, type FootSide } from '../profile/db'
 import type { FootContourPoint, FootMeasurement, FootView, PersonMask } from '../analysis/measureFoot'
 import { buildFootModel, type FootModel } from '../analysis/footModel'
 import FullScanScreen, { type ScanShots } from './FullScanScreen'
 import ResultSnapshot from './ResultSnapshot'
+import PixelSneakerLoader from '../ui/PixelSneakerLoader'
+import { subscribePersonSegmentState, type PersonSegmentState } from '../analysis/personSegment'
 
 // Мастер сканирования: СНАЧАЛА сбор двух фото (сверху + сбоку) в
 // полноэкранном режиме (FullScanScreen), ПОТОМ анализ в Web Worker.
@@ -114,6 +116,9 @@ export default function ScanPage() {
   const [manualOpen, setManualOpen] = useState(false)
   const [manual, setManual] = useState({ lengthMm: '', widthMm: '', instepHeightMm: '' })
   const [manualSaved, setManualSaved] = useState(false)
+  const [nnState, setNnState] = useState<PersonSegmentState>('idle')
+
+  useEffect(() => subscribePersonSegmentState(setNnState), [])
 
   /** Полный цикл FullScanScreen завершён — оборачиваем в Shot и уходим в анализ. */
   const handleScanComplete = useCallback((raw: ScanShots) => {
@@ -315,7 +320,10 @@ export default function ScanPage() {
           <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
             <div style={{ height: '100%', width: `${phaseProgress}%`, background: '#e8c547', transition: 'width 0.4s ease' }} />
           </div>
-          <p className="hint" style={{ margin: 0, textAlign: 'center' }}>{analyzingView || 'Подготовка…'}</p>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+            <PixelSneakerLoader size={36} />
+            <p className="hint" style={{ margin: 0 }}>{analyzingView || 'Подготовка…'}</p>
+          </div>
           <p className="hint" style={{ margin: 0, textAlign: 'center', color: 'var(--text-dim)' }}>
             Обычно 10–60 секунд, не закрывайте страницу.
           </p>
@@ -468,6 +476,12 @@ export default function ScanPage() {
       <button className="btn btn-block" onClick={() => setScanOpen(true)}>
         Начать сканирование
       </button>
+      {nnState === 'loading' && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+          <PixelSneakerLoader size={24} />
+          <span className="hint">Готовим модель анализа…</span>
+        </div>
+      )}
 
       {shots.top && shots.side && (
         <button className="btn btn-secondary btn-block" onClick={() => analyze()}>

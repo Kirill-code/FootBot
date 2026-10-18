@@ -395,3 +395,57 @@ a {
   color: #e8c547;
   text-align: center;
 }
+
+/* Пиксельный кроссовок-лоадер: 4 кадра (наклон/подпрыгивание), шаги без
+ * интерполяции — как покадровая анимация 8-битных спрайтов. */
+.pixel-sneaker {
+  position: relative;
+  image-rendering: pixelated;
+  animation: sneaker-hop 0.9s steps(1) infinite;
+  transform-origin: 50% 100%;
+}
+
+@keyframes sneaker-hop {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-8%) rotate(-8deg);
+  }
+  50% {
+    transform: translateY(-14%) rotate(0deg);
+  }
+  75% {
+    transform: translateY(-8%) rotate(6deg);
+  }
+}
+
+/* Пульсирующая тень под кроссовком. */
+.pixel-sneaker-shadow {
+  position: absolute;
+  bottom: -4px;
+  left: 15%;
+  width: 70%;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  animation: sneaker-shadow 0.9s steps(1) infinite;
+}
+
+@keyframes sneaker-shadow {
+  0%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0.55;
+  }
+  25%,
+  75% {
+    transform: scaleX(0.82);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleX(0.7);
+    opacity: 0.35;
+  }
+}

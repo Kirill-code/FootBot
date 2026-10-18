@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FootView } from '../analysis/measureFoot'
 import type { FootSide } from '../profile/db'
 import CameraView, { type CameraShot } from './CameraView'
+import PixelSneakerLoader from '../ui/PixelSneakerLoader'
 
 export interface ScanShots {
   top: CameraShot
@@ -186,9 +187,10 @@ export default function FullScanScreen({ foot, onFootChange, onClose, onComplete
             textAlign: 'center'
           }}
         >
-          <div>
+          <div style={{ display: 'grid', justifyItems: 'center', gap: 12 }}>
+            <PixelSneakerLoader size={64} />
             <div style={{ fontSize: 18, fontWeight: 600 }}>Готово ✓</div>
-            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', marginTop: 6 }}>
+            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)' }}>
               Теперь снимите стопу СБОКУ
             </div>
           </div>
